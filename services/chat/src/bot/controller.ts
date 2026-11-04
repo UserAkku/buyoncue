@@ -106,7 +106,7 @@ export class Controller {
         },
       ];
     }
-    return [{ text: "🔒 This PactPilot instance is private. Only its owner can manage rules or approve spending." }];
+    return [{ text: "🔒 This BuyOnCue instance is private. Only its owner can manage rules or approve spending." }];
   }
 
   // ------------------------------------------------------------ commands
@@ -243,7 +243,7 @@ export class Controller {
     const ai = this.interpreter ? "AI-assisted (LLM)" : "guided (no LLM configured)";
     return {
       text: [
-        `${bold("PactPilot")} — buys gift cards for you, automatically, within limits you set.`,
+        `${bold("BuyOnCue")} — buys gift cards for you, automatically, within limits you set.`,
         ``,
         `/newrule — create a rule (${ai})`,
         `/rules — your saved rules`,
@@ -262,11 +262,11 @@ export class Controller {
   private start(a: Actor): Reply {
     if (!this.isOwner(a)) {
       if (this.ownerUserId === null && a.chatType === "private") return this.denied(a)[0]!;
-      return { text: `👋 This is a private PactPilot instance. Your Telegram ID is ${code(a.userId)}.` };
+      return { text: `👋 This is a private BuyOnCue instance. Your Telegram ID is ${code(a.userId)}.` };
     }
     return {
       text: [
-        `👋 ${bold("Welcome to PactPilot.")}`,
+        `👋 ${bold("Welcome to BuyOnCue.")}`,
         `Describe a purchasing rule once, enable it, and I'll act when an authorized GitHub event happens, with approvals, limits and receipts right here.`,
         ``,
         this.interpreter
@@ -718,7 +718,7 @@ export class Controller {
     if (!hit) return [{ text: "I couldn't find that rule." }];
     return [
       {
-        text: `${renderRule(hit.view, a.userId)}\n\n⚠️ Enabling lets PactPilot spend automatically, within these limits, every time a matching PR is merged. Enable it?`,
+        text: `${renderRule(hit.view, a.userId)}\n\n⚠️ Enabling lets BuyOnCue spend automatically, within these limits, every time a matching PR is merged. Enable it?`,
         buttons: [[{ text: "✅ Yes, enable", data: `en:${ruleId}` }, { text: "Not now", data: "cancel" }]],
       },
     ];
@@ -795,7 +795,7 @@ export class Controller {
       this.logger.warn("engine_error", { kind: err.kind, status: err.status });
       switch (err.kind) {
         case "offline":
-          return { text: "⚠️ I can't reach the PactPilot engine right now. The request outcome may be unknown. Check /rules or /status before retrying an action." };
+          return { text: "⚠️ I can't reach the BuyOnCue engine right now. The request outcome may be unknown. Check /rules or /status before retrying an action." };
         case "unauthorized":
           return { text: "🔒 The engine rejected my internal API token. Check INTERNAL_API_TOKEN on both services. Nothing was changed." };
         case "invalid_response":
