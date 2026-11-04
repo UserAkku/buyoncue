@@ -8,7 +8,9 @@ Handoff date: 4 November 2026. Development stopped at the owner's request; this 
 - Latest commit before preserving working changes: `73c097c` (merge of GitHub App/Telegram branch).
 - The implementation preservation commit and subsequent documentation commit are in this branch's history. Resolve the final tip with `git rev-parse integration/final-ai-validation`; a document cannot embed its own final commit SHA.
 - Target for draft PR: `integration/baseline-verification`.
-- PR URL: pending creation immediately after the preservation commit; this document will be updated with the actual URL.
+- Exact pushed branch: `integration/final-ai-validation`.
+- Draft PR URL: https://github.com/UserAkku/buyoncue/pull/6
+- Preserved implementation commit SHA: `a1650e10d26cee1856d3086039e7cde9ba107694`. This final documentation-only follow-up adds the actual PR URL; resolve its tip with `git rev-parse HEAD`.
 - Integrated sources: baseline `5d8ac5e1d4e8890c3678f14de44e435f4493c703` (PR #3), AI engine `9f1cf98b7e961fd44f6c607e95bc87bd4c544d10` (PR #5), GitHub/Telegram `589b7f726ea07e0df6a9c5e6e3ff5b9a029965d1` (PR #4).
 - Merges were conflict-free. Original services and feature branches remain intact. No reset, clean, rebase, force-push or main merge was performed.
 
