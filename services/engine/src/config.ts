@@ -11,6 +11,12 @@ const schema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(3001),
   REDEMPTION_ENCRYPTION_KEY: z.string().regex(/^[a-fA-F0-9]{64}$/),
   APPROVAL_TTL_SECONDS: z.coerce.number().int().min(30).max(86400).default(900),
+  LLM_API_KEY:z.string().optional(),
+  LLM_BASE_URL:z.preprocess(v=>v===''?undefined:v,z.string().url().optional()),
+  LLM_MODEL:z.string().optional(),
+  AI_REVIEW_MIN_CONFIDENCE:z.coerce.number().min(0.5).max(1).default(0.8),
+  AI_REVIEW_MAX_AGE_SECONDS:z.coerce.number().int().min(60).max(86400).default(3600),
+  AI_ALLOW_PRIVATE_REPOSITORIES:z.enum(['true','false']).default('false'),
   WORKER_INTERVAL_MS: z.coerce.number().int().min(250).max(60000).default(2000)
 });
 export type Config = ReturnType<typeof loadConfig>;

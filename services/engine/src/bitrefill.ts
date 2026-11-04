@@ -26,6 +26,7 @@ export interface Purchasing {
   invoice(id: string): Promise<Invoice>;
   pay(id: string): Promise<void>;
   order(id: string): Promise<Order>;
+  balance?():Promise<{balance:string|number;currency:string}>;
 }
 const id = z.string().min(1).max(500);
 const rawPackage = z.object({ package_id: id.optional(), id: id.optional(), value: z.union([z.string(), z.number()]) });
@@ -143,7 +144,7 @@ export class TestPurchasing implements Purchasing {
   constructor(private catalogue: Catalogue, private db: Sql) {}
   private async state(id: string) {
     if (!id.startsWith('test:')) throw new Error('Test adapter refuses live invoices');
-    const {rows} = await this.db.query(`SELECT p.payment_attempted_at,r.product_id,r.package_id
+    const {rows} = await this.db.query(`SELECT p.payment_attempted_at,COALESCE(p.reward_product_id,r.product_id) AS product_id,COALESCE(p.reward_package_id,r.package_id) AS package_id
       FROM purchases p JOIN commerce_rules r ON r.id=p.rule_id WHERE p.id=$1`,[id.slice(5)]);
     const row=rows[0];
     if (!row) throw new Error('Unknown simulated purchase');
@@ -160,6 +161,7 @@ export class TestPurchasing implements Purchasing {
     const {paid}=await this.state(id);
     return {id,status:paid?'complete':'unpaid',payment:{method:'balance',currency:'USD',price:'1.00'},orders:[{id,status:paid?'delivered':'created'}]};
   }
+  async balance() {return {balance:'100000.00',currency:'USD'};}
   async pay(id: string) { if (!id.startsWith('test:')) throw new Error('Test adapter refuses live payment'); }
   async order(id: string): Promise<Order> {
     const {paid,product,pkg}=await this.state(id);

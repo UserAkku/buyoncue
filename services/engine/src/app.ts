@@ -4,8 +4,11 @@ import { z } from 'zod';
 import { type Engine } from './engine.js';
 import { AppError } from './errors.js';
 import { chatId, ruleSchema, triggerSchema } from './schemas.js';
+import { BountyService } from './bounty/service.js';
+import { UnconfiguredReviewer } from './bounty/reviewer.js';
+import { privateChatId } from './bounty/schemas.js';
 const uuidParams = z.object({ id:z.string().uuid() });
-export function buildApp(engine: Engine, internalToken: string) {
+export function buildApp(engine: Engine, internalToken: string, bounties = new BountyService(engine,new UnconfiguredReviewer())) {
   // Disable request logging: headers, webhook bodies and redemption must never be logged.
   const app = Fastify({ logger:false, bodyLimit:64*1024, requestTimeout:15000 });
   const tokenHash=createHash('sha256').update(`Bearer ${internalToken}`).digest();
@@ -60,6 +63,24 @@ export function buildApp(engine: Engine, internalToken: string) {
     return {items:await engine.notifications(limit)};
   });
   app.post('/v1/notifications/:id/ack',async request=>engine.ack(uuidParams.parse(request.params).id));
+  app.post('/v1/github/links',async(request,reply)=>reply.code(201).send({link:await bounties.link(request.body)}));
+  app.post('/v1/repositories/connect',async(request,reply)=>reply.code(201).send({repository:await bounties.connect(request.body)}));
+  app.get('/v1/repositories',async request=>{
+    const {ownerTelegramUserId}=z.object({ownerTelegramUserId:privateChatId}).strict().parse(request.query);
+    return {repositories:await bounties.repositories(ownerTelegramUserId)};
+  });
+  app.post('/v1/bounty-rules',async(request,reply)=>reply.code(201).send({rule:await bounties.createRule(request.body)}));
+  app.get('/v1/bounty-rules',async request=>{
+    const {ownerTelegramUserId}=z.object({ownerTelegramUserId:privateChatId}).strict().parse(request.query);
+    return {rules:await bounties.rules(ownerTelegramUserId)};
+  });
+  app.post('/v1/contributions/review',{bodyLimit:1024*1024},async(request,reply)=>reply.code(202).send(await bounties.submit(request.body)));
+  app.get('/v1/contributions/:id',async request=>bounties.get(uuidParams.parse(request.params).id));
+  app.post('/v1/contributions/:id/finalize',async(request,reply)=>{
+    const result=await bounties.finalize(uuidParams.parse(request.params).id,request.body);
+    return reply.code(result.accepted?202:200).send(result);
+  });
+  app.get('/v1/bounty-receipts/:id',async request=>({receipt:await bounties.receipt(uuidParams.parse(request.params).id)}));
   app.post('/webhooks/bitrefill',async request=>{
     // Bitrefill documents a full invoice object. Only its bounded ID is retained.
     const {id}=z.object({id:z.string().min(1).max(500)}).parse(request.body);
