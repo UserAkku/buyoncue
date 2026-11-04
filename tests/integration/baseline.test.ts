@@ -258,7 +258,13 @@ test('empty or extra invoice orders fail before any payment',async()=>{
   assert.equal((await processEvent()).errorCode,'UNEXPECTED_INVOICE_ORDERS');assert.equal(payments.pays.length,0);
 });
 
-test('new GitHub App client contract mismatch is rejected safely by the actual engine',async()=>{
-  await assert.rejects(client.linkGithub({githubUserId:'202',githubLogin:'contributor',telegramUserId:recipient,chatId:recipient}),{kind:'http',status:400});
+test('the GitHub App chat client speaks the engine\'s canonical identity contract (real HTTP)',async()=>{
+  await db.query('TRUNCATE github_identity_links CASCADE');
+  const link=await client.linkGithub({githubUserId:'202',githubLogin:'contributor',telegramUserId:recipient,verifiedAt:new Date().toISOString()});
+  assert.equal(link.githubUserId,'202');assert.equal(link.telegramUserId,recipient);
+  await client.linkGithub({githubUserId:'202',githubLogin:'renamed',telegramUserId:recipient,verifiedAt:new Date().toISOString()}); // same identity may refresh its login
+  await assert.rejects(client.linkGithub({githubUserId:'202',githubLogin:'contributor',telegramUserId:'4004',verifiedAt:new Date().toISOString()}),{kind:'http',status:409});
+  await assert.rejects(client.linkGithub({githubUserId:'not-a-number',githubLogin:'x',telegramUserId:'4004',verifiedAt:new Date().toISOString()}),{kind:'invalid_response'}); // refused before it is ever sent
+  await client.unlinkGithub(recipient);
   assert.equal(payments.creates.length,0);
 });

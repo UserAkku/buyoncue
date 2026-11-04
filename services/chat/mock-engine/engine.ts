@@ -176,9 +176,10 @@ export class MockEngine {
     }
     const act = path.match(/^\/v1\/rules\/([^/]+)\/(enable|pause|resume)$/);
     if (m === "POST" && act) {
-      const rule = this.rules.get(act[1]!);
+      const bounty = this.bountyRules.get(act[1]!);
+      const rule = this.rules.get(act[1]!) ?? bounty;
       if (!rule || rule.ownerChatId !== body?.ownerChatId) return send(404, { error: "rule not found" });
-      rule.status = act[2] === "pause" ? "paused" : "active";
+      rule.status = act[2] === "pause" ? "paused" : bounty ? "enabled" : "active";
       return send(200, { rule });
     }
     if (m === "POST" && path === "/v1/triggers/github") return send(202, this.onTrigger(body));
@@ -209,113 +210,150 @@ export class MockEngine {
     return send(404, { error: "not found" });
   }
 
-  // ---- AI bounty endpoints (working assumption of the contract; see docs/BOUNTY_ENGINE_CONTRACT.md)
-  readonly links = new Map<string, any>(); // telegramUserId -> link
-  readonly repositories = new Map<string, any>();
+  // ---- AI bounty endpoints: a lightweight fake of the CANONICAL engine contract (services/engine/BOUNTY_API.md).
+  // The real engine is exercised end to end in tests/integration/ai-bounty-e2e.test.ts.
+  readonly links = new Map<string, any>(); // telegramUserId -> { telegramUserId, githubUserId:number, githubLogin, verifiedAt, revoked }
+  readonly repositories = new Map<number, any>();
   readonly bountyRules = new Map<string, any>();
   readonly reviews = new Map<string, any>();
-  /** What the mock "AI" returns. Tests override. */
-  mockScore = {
-    total: 81,
-    max: 100,
-    breakdown: [
-      { category: "Correctness", score: 24, max: 30 },
-      { category: "Tests/CI", score: 20, max: 25 },
-      { category: "Review", score: 17, max: 20 },
-      { category: "Maintainability", score: 12, max: 15 },
-      { category: "Security", score: 8, max: 10 },
-    ],
-  };
-  mockTier: string | null = "Tier 2";
-  mockFinalStatus: string = "pending_approval";
+  readonly awards = new Map<string, any>(); // `${repositoryId}#${pr}` -> award
+  /** What the fake "AI" returns. Tests override. */
+  mockScore = { score: 81, subscores: { correctness: 24, tests: 20, feedback: 17, maintainability: 12, security: 8 } };
+  mockCandidate: any = { tier: 2, minScore: 70, maxScore: 84, faceValueINR: 100, requiresApproval: false, enabled: true };
+  mockReviewState = "REVIEWED";
+  mockEligibility: "ELIGIBLE" | "HOLD" = "ELIGIBLE";
+  mockReasons: string[] = [];
+  mockFinalAccepted = true;
+  mockReceiptStatus = "QUEUED";
+  mockReceiptInvoice: string | null = null;
+  mockReceiptOrders: { id: string; status: string }[] = [];
+
+  private static readonly EVIDENCE_KEYS = ["installationId", "repositoryId", "repositoryFullName", "repositoryPrivate", "prNumber", "headSha", "baseSha", "authorGithubUserId", "authorLogin", "authorIsBot", "merged", "collectedAt", "title", "description", "labels", "files", "commits", "checks", "reviews", "linkedIssues", "evidenceTruncated", "ciComplete", "maintainerAuthorization"];
 
   private handleBounty(m: string, path: string, url: URL, body: any, send: (s: number, j: unknown) => void): boolean {
     const err = (status: number, code: string, message: string) => send(status, { error: { code, message } });
+    const bad = (why: string) => (err(400, "INVALID_REQUEST", why), true);
+    const exact = (o: any, keys: string[]) => o && typeof o === "object" && Object.keys(o).sort().join() === [...keys].sort().join();
+    const positiveInt = (n: unknown) => Number.isSafeInteger(n) && (n as number) > 0;
     if (m === "POST" && path === "/v1/github/links") {
+      if (!exact(body, ["telegramUserId", "githubUserId", "githubLogin", "verificationSource", "verifiedAt"]) || !positiveInt(body.githubUserId) || body.verificationSource !== "github_oauth" || !/^[1-9]\d{0,14}$/.test(String(body.telegramUserId))) return bad("bad link body");
       const clash = [...this.links.values()].find((l) => l.githubUserId === body.githubUserId && l.telegramUserId !== body.telegramUserId);
-      if (clash) return err(409, "LINK_CONFLICT", "GitHub account already linked"), true;
-      const link = { githubUserId: body.githubUserId, githubLogin: body.githubLogin, telegramUserId: body.telegramUserId, chatId: body.chatId, linkedAt: new Date().toISOString() };
+      const mine = this.links.get(body.telegramUserId);
+      if (clash || (mine && mine.githubUserId !== body.githubUserId)) return err(409, "IDENTITY_CONFLICT", "Verified identity is already linked to another account"), true;
+      const link = { telegramUserId: body.telegramUserId, githubUserId: body.githubUserId, githubLogin: body.githubLogin, verifiedAt: body.verifiedAt, verificationSource: "github_oauth", revoked: false };
       this.links.set(body.telegramUserId, link);
       return send(201, { link }), true;
     }
     if (m === "POST" && path === "/v1/github/links/unlink") {
-      this.links.delete(body.telegramUserId);
-      return send(200, { ok: true }), true;
+      if (!exact(body, ["telegramUserId"])) return bad("bad unlink body");
+      const l = this.links.get(body.telegramUserId);
+      const unlinked = !!l && !l.revoked;
+      if (l) l.revoked = true;
+      return send(200, { unlinked }), true;
     }
     if (m === "POST" && path === "/v1/repositories/connect") {
-      const repository = { repositoryId: body.repositoryId, installationId: body.installationId, fullName: body.fullName, ownerChatId: body.ownerChatId, status: "connected" };
+      if (!exact(body, ["ownerTelegramUserId", "repositoryId", "repositoryFullName", "installationId", "verifiedOwnerAccess", "repositoryPrivate"]) || body.verifiedOwnerAccess !== true || !positiveInt(body.repositoryId) || !positiveInt(body.installationId)) return bad("bad connect body");
+      const owner = this.links.get(body.ownerTelegramUserId);
+      if (!owner || owner.revoked) return err(403, "OWNER_IDENTITY_NOT_VERIFIED", "Maintainer must link GitHub through OAuth first"), true;
+      const prior = this.repositories.get(body.repositoryId);
+      if (prior && (prior.ownerTelegramUserId !== body.ownerTelegramUserId || prior.installationId !== body.installationId)) return err(409, "REPOSITORY_OWNERSHIP_CONFLICT", "conflict"), true;
+      const repository = { repositoryId: body.repositoryId, installationId: body.installationId, repositoryFullName: String(body.repositoryFullName).toLowerCase(), ownerTelegramUserId: body.ownerTelegramUserId, ownerGithubUserId: owner.githubUserId, repositoryPrivate: body.repositoryPrivate };
       this.repositories.set(body.repositoryId, repository);
       return send(201, { repository }), true;
     }
     if (m === "GET" && path === "/v1/repositories") {
-      const owner = url.searchParams.get("ownerChatId");
-      const repositories = [...this.repositories.values()].filter((r) => r.ownerChatId === owner).map((r) => ({ ...r, bountyRule: [...this.bountyRules.values()].find((b) => b.repositoryId === r.repositoryId) ?? null }));
-      return send(200, { repositories }), true;
+      const owner = url.searchParams.get("ownerTelegramUserId");
+      return send(200, { repositories: [...this.repositories.values()].filter((r) => r.ownerTelegramUserId === owner) }), true;
     }
-    const disc = path.match(/^\/v1\/repositories\/([^/]+)\/disconnect$/);
-    if (m === "POST" && disc) {
-      const r = this.repositories.get(decodeURIComponent(disc[1]!));
-      if (r) r.status = "disconnected";
-      return send(200, { ok: true }), true;
+    if (m === "GET" && path === "/v1/bounty-rules") {
+      const owner = url.searchParams.get("ownerTelegramUserId");
+      return send(200, { rules: [...this.bountyRules.values()].filter((r) => r.ownerTelegramUserId === owner) }), true;
     }
     if (m === "POST" && path === "/v1/bounty-rules") {
-      if (!this.repositories.has(body.repositoryId)) return err(404, "REPOSITORY_NOT_FOUND", "repository not connected"), true;
+      if (!exact(body, ["ownerTelegramUserId", "repositoryId", "requiredLabel", "mode", "requireMerged", "requireSuccessfulCI", "scoreThreshold", "tiers", "autoApproveUpToUsdCents", "perPurchaseCapUsdCents", "dailyCapUsdCents", "monthlyCapUsdCents", "allowSelfReward"]) || body.mode !== "ai_contribution_bounty" || body.requireMerged !== true || !body.requiredLabel || !(body.scoreThreshold >= 50)) return bad("bad rule body");
+      const repo = this.repositories.get(body.repositoryId);
+      if (!repo || repo.ownerTelegramUserId !== body.ownerTelegramUserId) return err(403, "REPOSITORY_NOT_AUTHORIZED", "Repository is not connected for this maintainer"), true;
+      if ([...this.bountyRules.values()].some((r) => r.repositoryId === body.repositoryId)) return err(409, "BOUNTY_POLICY_EXISTS", "exists"), true;
       for (const t of body.tiers) {
+        if (!exact(t, ["minScore", "maxScore", "faceValueINR", "productId", "packageId", "requiresApproval"])) return bad("bad tier");
         const p = this.products.find((x) => x.id === t.productId);
-        if (!p || !p.packages.some((k) => k.packageId === t.packageId)) return err(404, "PRODUCT_NOT_FOUND", "unknown product or package"), true;
+        const pkg = p?.packages.find((k) => k.packageId === t.packageId);
+        if (!p || p.currency !== "INR" || p.country !== "IN" || !pkg || pkg.value !== t.faceValueINR) return err(400, "UNVERIFIED_TIER", "Tier must match an exact Indian INR catalogue package"), true;
       }
-      const bountyRule = { id: randomUUID(), status: "draft", ...body };
-      this.bountyRules.set(bountyRule.id, bountyRule);
-      return send(201, { bountyRule }), true;
-    }
-    const ract = path.match(/^\/v1\/bounty-rules\/([^/]+)\/(enable|pause|resume)$/);
-    if (m === "POST" && ract) {
-      const rule = this.bountyRules.get(ract[1]!);
-      if (!rule || rule.ownerChatId !== body?.ownerChatId) return err(404, "NOT_FOUND", "bounty rule not found"), true;
-      rule.status = ract[2] === "pause" ? "paused" : "active";
-      return send(200, { bountyRule: rule }), true;
+      const rule = { id: randomUUID(), status: "draft", kind: "bounty", name: "AI contribution bounty", repositoryId: body.repositoryId, installationId: repo.installationId, ownerTelegramUserId: body.ownerTelegramUserId, ownerChatId: body.ownerTelegramUserId, ownerGithubUserId: repo.ownerGithubUserId, policyVersion: 1, mode: body.mode, requiredLabel: body.requiredLabel, requireSuccessfulCI: body.requireSuccessfulCI, scoreThreshold: body.scoreThreshold, tiers: body.tiers.map((t: any) => ({ ...t, enabled: true })), perPurchaseCapUsdCents: body.perPurchaseCapUsdCents, dailyCapUsdCents: body.dailyCapUsdCents, monthlyCapUsdCents: body.monthlyCapUsdCents, autoApproveUpToUsdCents: body.autoApproveUpToUsdCents };
+      this.bountyRules.set(rule.id, rule);
+      return send(201, { rule }), true;
     }
     if (m === "POST" && path === "/v1/contributions/review") {
-      const prior = [...this.reviews.values()].find((r) => r.idempotencyKey === body.idempotencyKey);
-      if (prior) return send(200, { review: this.reviewView(prior) }), true;
-      if (body.supersedesReviewId) {
-        const old = this.reviews.get(body.supersedesReviewId);
-        if (old) old.status = "superseded";
-      }
-      const review = { reviewId: randomUUID(), idempotencyKey: body.idempotencyKey, status: "completed", repositoryId: body.repositoryId, prNumber: body.prNumber, headSha: body.headSha, purpose: body.purpose, request: body, finalization: null as any };
+      if (!body || typeof body !== "object") return bad("bad evidence");
+      const unknown = Object.keys(body).filter((k) => !MockEngine.EVIDENCE_KEYS.includes(k));
+      const missing = MockEngine.EVIDENCE_KEYS.filter((k) => !(k in body));
+      if (unknown.length || missing.length || !positiveInt(body.repositoryId) || !positiveInt(body.installationId) || !positiveInt(body.authorGithubUserId) || !/^[a-f0-9]{40}$/.test(body.headSha) || !/^[a-f0-9]{40}$/.test(body.baseSha)) return bad(`bad evidence: unknown=${unknown} missing=${missing}`);
+      const repo = this.repositories.get(body.repositoryId);
+      if (!repo || repo.installationId !== body.installationId) return err(403, "REPOSITORY_NOT_AUTHORIZED", "No approved repository bounty policy"), true;
+      const { collectedAt: _c, ...stable } = body;
+      const key = JSON.stringify(stable);
+      const prior = [...this.reviews.values()].find((r) => r.key === key);
+      if (prior) return send(202, { reviewId: prior.reviewId, state: prior.state, eligibilityState: "HOLD" }), true;
+      for (const r of this.reviews.values()) if (r.request.repositoryId === body.repositoryId && r.request.prNumber === body.prNumber) r.state = "STALE";
+      const review = { reviewId: randomUUID(), key, request: body, state: "QUEUED" as string, finalizedFor: null as string | null };
       this.reviews.set(review.reviewId, review);
-      return send(202, { review: this.reviewView(review) }), true;
+      return send(202, { reviewId: review.reviewId, state: "QUEUED", eligibilityState: "HOLD" }), true;
     }
     const getRev = path.match(/^\/v1\/contributions\/([^/]+)$/);
     if (m === "GET" && getRev) {
       const r = this.reviews.get(getRev[1]!);
-      return r ? send(200, { review: this.reviewView(r) }) : err(404, "NOT_FOUND", "review not found"), true;
+      if (!r) return err(404, "REVIEW_NOT_FOUND", "Contribution review not found"), true;
+      if (r.state === "QUEUED") r.state = this.mockReviewState;
+      return send(200, this.reviewView(r)), true;
     }
     const fin = path.match(/^\/v1\/contributions\/([^/]+)\/finalize$/);
     if (m === "POST" && fin) {
       const r = this.reviews.get(fin[1]!);
-      if (!r) return err(404, "NOT_FOUND", "review not found"), true;
-      if (body.expectedHeadSha !== r.headSha) return err(409, "HEAD_SHA_MISMATCH", "review is for a different commit"), true;
-      r.finalizeRequest = body;
-      r.finalization = { status: this.mockFinalStatus, tier: this.mockTier, purchaseId: null, invoiceId: this.mockFinalStatus === "delivered" ? "MOCK-INV-BOUNTY" : null };
-      return send(200, { review: this.reviewView(r) }), true;
+      if (!r) return err(404, "REVIEW_NOT_FOUND", "Contribution review not found"), true;
+      if (!exact(body, ["githubDeliveryId", "repositoryId", "prNumber", "headSha", "merged"])) return bad("bad finalize body");
+      if (body.repositoryId !== r.request.repositoryId || body.prNumber !== r.request.prNumber) return err(409, "FINALIZATION_IDENTITY_MISMATCH", "mismatch"), true;
+      if (body.headSha !== r.request.headSha) return send(200, { accepted: false, reviewId: r.reviewId, state: "STALE", eligibilityState: "HOLD", reasons: ["FINAL_SHA_MISMATCH"] }), true;
+      const reasons = [...(r.request.merged ? [] : ["FINAL_MERGED_REVIEW_REQUIRED"]), ...(body.merged ? [] : ["NOT_MERGED"]), ...this.mockReasons];
+      if (reasons.length || !this.mockFinalAccepted) return send(200, { accepted: false, reviewId: r.reviewId, state: r.state, eligibilityState: "HOLD", reasons }), true;
+      const k = `${body.repositoryId}#${body.prNumber}`;
+      const existing = this.awards.get(k);
+      if (existing) return send(202, { accepted: true, reviewId: r.reviewId, reason: "duplicate_pr", awardId: existing.awardId, purchaseId: existing.purchaseId }), true;
+      const award = { awardId: randomUUID(), purchaseId: randomUUID() };
+      this.awards.set(k, award);
+      return send(202, { accepted: true, reviewId: r.reviewId, reason: "queued", ...award }), true;
+    }
+    const rc = path.match(/^\/v1\/bounty-receipts\/([^/]+)$/);
+    if (m === "GET" && rc) {
+      const a = [...this.awards.entries()].find(([, v]) => v.purchaseId === rc[1]);
+      if (!a) return err(404, "RECEIPT_NOT_FOUND", "Bounty receipt not found"), true;
+      return send(200, { receipt: { purchaseId: rc[1], mode: "test", status: this.mockReceiptStatus, invoiceId: this.mockReceiptInvoice, amountUsdCents: null, invoiceStatus: null, errorCode: null, score: this.mockScore.score, tier: this.mockCandidate?.tier ?? null, faceValueINR: this.mockCandidate?.faceValueINR ?? null, prNumber: Number(a[0].split("#")[1]), orders: this.mockReceiptOrders } }), true;
     }
     return false;
   }
 
   private reviewView(r: any) {
-    const superseded = r.status === "superseded";
+    const done = r.state === "REVIEWED";
     return {
       reviewId: r.reviewId,
-      status: r.status,
-      repositoryId: r.repositoryId,
-      prNumber: r.prNumber,
-      headSha: r.headSha,
-      provisional: r.finalization ? false : true,
-      score: superseded ? null : this.mockScore,
-      candidateTier: superseded ? null : this.mockTier,
-      summary: "Mock summary",
-      finalization: r.finalization,
+      ruleId: [...this.bountyRules.values()].find((b) => b.repositoryId === r.request.repositoryId)?.id ?? null,
+      policyVersion: 1,
+      repositoryId: r.request.repositoryId,
+      prNumber: r.request.prNumber,
+      headSha: r.request.headSha,
+      authorGithubUserId: r.request.authorGithubUserId,
+      state: r.state,
+      eligibilityState: done ? this.mockEligibility : "HOLD",
+      reasons: done ? this.mockReasons : r.state === "STALE" ? ["SUPERSEDED_EVIDENCE"] : [],
+      score: done ? this.mockScore.score : null,
+      subscores: done ? this.mockScore.subscores : null,
+      confidence: done ? 0.95 : null,
+      findings: done ? [{ severity: "info", message: "Mock finding", evidenceRefs: ["goal"] }] : [],
+      reasoningSummary: done ? "Mock summary" : null,
+      riskFlags: [],
+      candidateTier: done ? this.mockCandidate : null,
+      model: "mock-reviewer",
+      validUntil: new Date(Date.now() + 3600_000).toISOString(),
     };
   }
 

@@ -25,6 +25,8 @@ No PR-provided text, model output, author-applied label or username is sufficien
 {"telegramUserId":"456","githubUserId":202,"githubLogin":"contributor","verificationSource":"github_oauth","verifiedAt":"2026-11-04T12:00:00Z"}
 ```
 
+`POST /v1/github/links/unlink` with `{ "telegramUserId":"456" }` → `{ "unlinked": true|false }` (idempotent). It **soft-revokes** the link (`revoked_at`, migration `003_identity_revocation.sql`): finalization, review eligibility, purchase execution and policy/repository creation all ignore revoked links, so rewards stop immediately, while awards and repositories keep their history. Only the *same* GitHub identity can re-link a revoked Telegram user (anything else is 409). A revoked maintainer's policy cannot finalize (`OWNER_IDENTITY_REVOKED`).
+
 One positive private Telegram ID maps to one numeric GitHub ID, and vice versa. Same identity may refresh its verified login/time; username changes do not change payout identity. Conflicting ownership returns 409. Future verification timestamps are rejected. Link the maintainer through the same endpoint before connecting their repository.
 
 `POST /v1/repositories/connect` → HTTP 201 `{ "repository": ... }`.
@@ -181,12 +183,13 @@ REDEMPTION_ENCRYPTION_KEY=
 LLM_API_KEY=
 LLM_BASE_URL=
 LLM_MODEL=
+LLM_REVIEW_MAX_CALLS_PER_PR=6
 AI_REVIEW_MIN_CONFIDENCE=0.8
 AI_REVIEW_MAX_AGE_SECONDS=3600
 AI_ALLOW_PRIVATE_REPOSITORIES=false
 ```
 
-The chat environment owns Telegram and GitHub App/OAuth credentials (`GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_WEBHOOK_SECRET`, callback/install/public-chat URLs). **Claude's adapter should standardize on `GITHUB_APP_PRIVATE_KEY_PATH` for a local `.pem` file**, read the file to obtain PEM contents, and pass the contents—not the pathname string—to its signing library. Do not send that path, PEM, OAuth tokens or installation tokens to this engine or the reviewer. No chat files were changed by this implementation. A direct external Claude session was unavailable; this contract and a handoff on chat PR #4 provide asynchronous coordination. That PR currently assumes different request/response shapes and must be reconciled before claiming new end-to-end bounty integration.
+The chat environment owns Telegram and GitHub App/OAuth credentials (`GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_WEBHOOK_SECRET`, callback/install/public-chat URLs). **Claude's adapter should standardize on `GITHUB_APP_PRIVATE_KEY_PATH` for a local `.pem` file**, read the file to obtain PEM contents, and pass the contents—not the pathname string—to its signing library. Do not send that path, PEM, OAuth tokens or installation tokens to this engine or the reviewer. No chat files were changed by this implementation. A direct external Claude session was unavailable; this contract and a handoff on chat PR #4 provide asynchronous coordination. The chat adapter has since been reconciled to this document and is exercised end to end against this API in `tests/integration/ai-bounty-e2e.test.ts`.
 
 Engine scoring uses its own optional `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` values. `LLM_BASE_URL` is the OpenAI-compatible API base (typically ending `/v1`); the engine appends `/chat/completions`, requests JSON output, uses no tools and refuses redirects. HTTPS is required except local development origins. Missing/incomplete settings produce `MODEL_UNAVAILABLE`/`NEEDS_REVIEW`, never a fabricated score. Slow model work runs independently of payment reconciliation.
 

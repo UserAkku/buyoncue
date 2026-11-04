@@ -32,7 +32,9 @@ describe("contributor linking (/linkgithub)", () => {
     const done = await b.post(`${s.base}/auth/github/confirm`, formFields(rt.html));
     expect(done.status).toBe(200);
     expect(await done.text()).toContain("Connected");
-    expect(s.engine.calls("POST", "/v1/github/links")[0]!.body).toEqual({ githubUserId: "6001", githubLogin: "contrib", telegramUserId: "2002", chatId: "2002" });
+    expect(s.engine.calls("POST", "/v1/github/links")[0]!.body).toMatchObject({ telegramUserId: "2002", githubUserId: 6001, githubLogin: "contrib", verificationSource: "github_oauth" });
+    expect(typeof s.engine.calls("POST", "/v1/github/links")[0]!.body.verifiedAt).toBe("string");
+    expect(Object.keys(s.engine.calls("POST", "/v1/github/links")[0]!.body).sort()).toEqual(["githubLogin", "githubUserId", "telegramUserId", "verificationSource", "verifiedAt"]);
     expect(s.store.getLink("2002")).toMatchObject({ githubUserId: "6001", githubLogin: "contrib" });
     expect(s.store.telegramUserForGithub("6001")).toBe("2002");
     expect(s.sent.at(-1)!.chatId).toBe("2002");
@@ -139,7 +141,7 @@ describe("contributor linking (/linkgithub)", () => {
   });
 
   it("refuses to re-link a GitHub account that belongs to another Telegram user (engine 409)", async () => {
-    s.engine.links.set("9999", { githubUserId: "6001", githubLogin: "contrib", telegramUserId: "9999", chatId: "9999" });
+    s.engine.links.set("9999", { githubUserId: 6001, githubLogin: "contrib", telegramUserId: "9999", revoked: false });
     const b = new Browser();
     const rt = await oauthRoundTrip(s, b, await contributorStart(), 6001);
     const res = await b.post(`${s.base}/auth/github/confirm`, formFields(rt.html));
@@ -158,7 +160,7 @@ describe("contributor linking (/linkgithub)", () => {
     expect(s.store.getLink("2002")).toBeDefined();
     await s.controller.handleCallback(contributor, "uly");
     expect(s.store.getLink("2002")).toBeUndefined();
-    expect(s.engine.links.has("2002")).toBe(false);
+    expect(s.engine.links.get("2002").revoked).toBe(true);
   });
 });
 
@@ -198,7 +200,7 @@ describe("maintainer connection (/connectgithub)", () => {
     expect(textOf(res.replies)).toContain("acme/app");
     expect(textOf(res.replies)).toContain("configure an AI bounty policy");
     expect(s.engine.calls("POST", "/v1/repositories/connect")[0]!.body).toEqual({
-      ownerChatId: "1001", authorizedByGithubUserId: "5001", installationId: "9001", repositoryId: "4242", fullName: "acme/app",
+      ownerTelegramUserId: "1001", repositoryId: 4242, repositoryFullName: "acme/app", installationId: 9001, verifiedOwnerAccess: true, repositoryPrivate: false,
     });
     expect(s.store.getRepo("4242")?.status).toBe("connected");
     // Installation access (JWT then installation token) was used to verify, not the browser's data.

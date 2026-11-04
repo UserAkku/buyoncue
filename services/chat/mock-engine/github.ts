@@ -18,6 +18,9 @@ export interface Recorded {
   body: any;
 }
 
+/** A well-formed 40-hex SHA made from one hex digit, e.g. sha("a"). */
+export const sha = (c: string) => c.repeat(40).slice(0, 40);
+
 export class MockGithub {
   readonly appId = 4321;
   readonly clientId = "Iv1.testclient";
@@ -36,6 +39,9 @@ export class MockGithub {
   readonly checkRuns = new Map<string, any[] | "forbidden">();
   readonly statuses = new Map<string, any[]>();
   readonly issues = new Map<string, any>();
+  /** review threads per `${fullName}#${n}` for GraphQL: [{ isResolved }] */
+  readonly threads = new Map<string, { isResolved: boolean }[]>();
+  graphqlFails = false;
   /** branch rules per `${fullName}:${branch}`; absence -> 404 */
   readonly branchRules = new Map<string, any[]>();
   /** oauth code -> userId; deleted on use */
@@ -74,11 +80,12 @@ export class MockGithub {
     this.roles.set("acme/app:maint", "admin");
     this.roles.set("acme/app:contrib", "write");
     this.roles.set("acme/app:intruder", "read");
-    this.setPr("acme/app", 42, { headSha: "sha-head-1" });
+    this.branchRules.set("acme/app:main", [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "ci" }] } }]);
+    this.setPr("acme/app", 42, { headSha: sha("a") });
     return this;
   }
 
-  setPr(fullName: string, number: number, o: { headSha: string; merged?: boolean; labels?: string[]; body?: string; title?: string; state?: string }): void {
+  setPr(fullName: string, number: number, o: { headSha: string; merged?: boolean; labels?: string[]; body?: string; title?: string; state?: string; isPrivate?: boolean; authorType?: string }): void {
     const repo = [...this.repos.values()].find((r) => r.full_name === fullName)!;
     this.prs.set(`${fullName}#${number}`, {
       number,
@@ -86,14 +93,14 @@ export class MockGithub {
       draft: false,
       merged: o.merged ?? false,
       merged_at: o.merged ? "2026-11-04T12:00:00Z" : null,
-      merge_commit_sha: o.merged ? "merge-sha" : null,
+      merge_commit_sha: o.merged ? sha("e") : null,
       mergeable_state: "clean",
       title: o.title ?? "Add feature",
       body: o.body ?? "Closes #7",
-      user: { id: 6001, login: "contrib" },
+      user: { id: 6001, login: "contrib", type: o.authorType ?? "User" },
       labels: (o.labels ?? ["reward-ready"]).map((name) => ({ name })),
       head: { sha: o.headSha, ref: "feature" },
-      base: { sha: "sha-base", ref: "main", repo: { id: repo.id, full_name: fullName } },
+      base: { sha: sha("b"), ref: "main", repo: { id: repo.id, full_name: fullName, private: o.isPrivate ?? false } },
       changed_files: 3,
       additions: 30,
       deletions: 4,
@@ -104,8 +111,8 @@ export class MockGithub {
         { filename: "test/a.test.ts", status: "added", additions: 10, deletions: 0, changes: 10, patch: "@@ -0,0 +1 @@\n+t" },
         { filename: "logo.png", status: "added", additions: 0, deletions: 0, changes: 0 },
       ]);
-      this.commits.set(`${fullName}#${number}`, [{ sha: "c1", author: { id: 6001, login: "contrib" }, commit: { message: "feat: add\n\nbody", author: { date: "2026-11-03T10:00:00Z" } } }]);
-      this.reviews.set(`${fullName}#${number}`, [{ id: 1, user: { id: 5001, login: "maint" }, state: "APPROVED", submitted_at: "2026-11-03T11:00:00Z", commit_id: o.headSha }]);
+      this.commits.set(`${fullName}#${number}`, [{ sha: sha("c"), author: { id: 6001, login: "contrib" }, commit: { message: "feat: add\n\nbody", author: { date: "2026-11-03T10:00:00Z" } } }]);
+      this.reviews.set(`${fullName}#${number}`, [{ id: 1, user: { id: 5001, login: "maint" }, state: "APPROVED", body: "Looks right to me.", submitted_at: "2026-11-03T11:00:00Z", commit_id: o.headSha }]);
       this.issues.set(`${fullName}#7`, { number: 7, state: "open", title: "Bug 7", labels: [{ name: "bug" }] });
     }
     this.checkRuns.set(`${fullName}@${o.headSha}`, [{ id: 1, name: "ci", status: "completed", conclusion: "success", app: { slug: "github-actions" } }]);
@@ -201,7 +208,13 @@ export class MockGithub {
 
     if (method === "GET" && path === "/installation/repositories") {
       const rs = inst.repoIds.map((r) => this.repos.get(r)!);
-      return page(rs, (p) => ({ total_count: rs.length, repositories: p.map((r) => ({ id: r.id, full_name: r.full_name })) }));
+      return page(rs, (p) => ({ total_count: rs.length, repositories: p.map((r) => ({ id: r.id, full_name: r.full_name, private: false })) }));
+    }
+    if (method === "POST" && path === "/graphql") {
+      if (this.graphqlFails) return send(502, { message: "Bad gateway" });
+      const v = body?.variables ?? {};
+      const nodes = this.threads.get(`${v.owner}/${v.name}#${v.number}`) ?? [];
+      return send(200, { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } } } });
     }
     const userById = path.match(/^\/user\/(\d+)$/);
     if (method === "GET" && userById) {

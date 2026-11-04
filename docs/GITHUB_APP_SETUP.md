@@ -43,7 +43,7 @@ Everything else stays **No access**. Do **not** grant Contents or Pull requests 
 
 ### Subscribe to events
 
-Tick **Pull request** only. Check-run events are not needed: the final evidence is re-collected from GitHub when a PR merges, and `/review` re-collects on demand.
+Tick **Pull request** only (this also delivers `labeled`/`unlabeled`, which is how a maintainer's label is bound to the exact head commit). Installation, repository-removal and authorization-revoked events are delivered to every GitHub App automatically. Check-run events are not needed: the final evidence is re-collected from GitHub when a PR merges, and `/review` re-collects on demand.
 
 `installation`, `installation_repositories` and `github_app_authorization` are sent to every GitHub App automatically (GitHub's webhook docs: they can't be subscribed to or unsubscribed from). PactPilot uses them to stop work when access is removed.
 
@@ -84,7 +84,13 @@ Security properties of this flow (all covered by tests): single-use random sessi
 
 ## Revoking access safely
 
-- **Stop everything for a repo:** GitHub → Settings → Applications → Installed GitHub Apps → *your app* → Configure → remove the repository (or **Uninstall**). The `installation_repositories` / `installation` webhook makes PactPilot mark the repo revoked, pause its bounty rule through the engine (best effort), ask the engine to disconnect it, ignore further PR events for it, and message the owner.
+- **Stop everything for a repo:** GitHub → Settings → Applications → Installed GitHub Apps → *your app* → Configure → remove the repository (or **Uninstall**). The `installation_repositories` / `installation` webhook makes PactPilot mark the repo revoked locally (hard stop), pause its bounty rule through the engine's owner-checked pause route, ignore further PR events for it, and message the owner. If the engine could not confirm the pause, the message says so, and the engine still refuses to finalize anything whose installation or rule state no longer matches.
 - **A contributor unlinks:** `/unlinkgithub` in Telegram, or revoke the app under GitHub → Settings → Applications → Authorized GitHub Apps (`github_app_authorization` webhook unlinks them).
 - **Rotate secrets:** generate a new client secret / private key in the app settings, update `.env`, restart, then delete the old ones.
 - **Emergency:** *Pause rewards* in the bot, or suspend the app on GitHub.
+
+## What makes a PR payable (and what the demo repository needs)
+
+A merged PR is rewarded only if the engine agrees on **all** of: the author linked their numeric GitHub ID (`/linkgithub`); the connected maintainer authorized the exact final head commit (they applied the policy label themselves, or approved that commit with all review threads resolved); every *required* check reported success for that commit; the merged-PR AI review is confident and above the lowest tier; the policy is enabled; and spending limits hold.
+
+Because the app has no Administration permission, "required checks" are read from **repository rulesets**. Create a ruleset on the default branch with *Require status checks to pass* (for example your `ci` workflow). Without one, the bot cannot prove CI is complete and the engine holds the reward (`REQUIRED_CI_MISSING`). This has not yet been verified against a real installation.

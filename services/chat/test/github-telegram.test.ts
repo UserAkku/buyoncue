@@ -3,7 +3,7 @@ import { loadConfig, normalizePrivateKey } from "../src/config.js";
 import { NotificationWorker, type Sender } from "../src/notifications/worker.js";
 import { silentLogger } from "../src/logger.js";
 import { buttonData, cbText, owner, stranger, textOf } from "./helpers.js";
-import { contributor, prPayload, startStack, type Stack } from "./github-stack.js";
+import { contributor, prPayload, sha, startStack, type Stack } from "./github-stack.js";
 
 let s: Stack;
 beforeEach(async () => {
@@ -23,6 +23,7 @@ const GITHUB_OWNER_ONLY = [
 ] as const;
 
 describe("/setbounty", () => {
+  beforeEach(() => s.engine.bountyRules.clear()); // beforeEach in the outer scope created a policy; this suite configures its own
   async function runFlow() {
     let replies = await s.controller.handleCommand(owner, "setbounty", "");
     expect(textOf(replies)).toContain("acme/app");
@@ -58,27 +59,31 @@ describe("/setbounty", () => {
     const created = s.engine.calls("POST", "/v1/bounty-rules");
     expect(created).toHaveLength(1);
     expect(created[0]!.body).toEqual({
-      ownerChatId: "1001",
-      repositoryId: "4242",
-      name: "acme/app rewards",
+      ownerTelegramUserId: "1001",
+      repositoryId: 4242,
       requiredLabel: "reward-ready",
+      mode: "ai_contribution_bounty",
+      requireMerged: true,
+      requireSuccessfulCI: true,
+      scoreThreshold: 60,
       tiers: [
-        { name: "Tier 1", minScore: 60, productId: "mock-flipkart-in", packageId: "mock-flipkart-in-50" },
-        { name: "Tier 2", minScore: 80, productId: "mock-flipkart-in", packageId: "mock-flipkart-in-100" },
+        { minScore: 60, maxScore: 79, faceValueINR: 50, productId: "mock-flipkart-in", packageId: "mock-flipkart-in-50", requiresApproval: false },
+        { minScore: 80, maxScore: 100, faceValueINR: 100, productId: "mock-flipkart-in", packageId: "mock-flipkart-in-100", requiresApproval: false },
       ],
+      autoApproveUpToUsdCents: 150,
       perPurchaseCapUsdCents: 200,
       dailyCapUsdCents: 500,
       monthlyCapUsdCents: 2000,
-      autoApproveUpToUsdCents: 150,
+      allowSelfReward: false,
     });
-    const [rule] = [...s.engine.bountyRules.values()];
+    const rule = [...s.engine.bountyRules.values()].find((r) => r.id !== "rule-1")!;
     expect(rule.status).toBe("draft");
-    expect(s.engine.calls("POST", `/v1/bounty-rules/${rule.id}/enable`)).toHaveLength(0);
+    expect(s.engine.calls("POST", `/v1/rules/${rule.id}/enable`)).toHaveLength(0);
 
     const enable = buttonData(replies).find((d) => d.startsWith("be:"))!;
     const res = await s.controller.handleCallback(owner, enable);
     expect(cbText(res)).toContain("enabled");
-    expect(rule.status).toBe("active");
+    expect(rule.status).toBe("enabled");
     expect(buttonData(res.replies)).toContain(`bp:${rule.id}`); // Pause rewards
 
     const paused = await s.controller.handleCallback(owner, `bp:${rule.id}`);
@@ -88,7 +93,7 @@ describe("/setbounty", () => {
 
   it("never converts INR to a USD limit and keeps limits ordered", async () => {
     await s.controller.handleCommand(owner, "setbounty", "");
-    await s.controller.handleCallback(owner, "bts:any");
+    await s.controller.handleText(owner, "reward-ready");
     await s.controller.handleText(owner, "flipkart");
     await s.controller.handleCallback(owner, "bpr:0");
     await s.controller.handleCallback(owner, "btc:1");
@@ -101,7 +106,7 @@ describe("/setbounty", () => {
 
   it("rejects a product that disappeared from the catalog before creating anything", async () => {
     await s.controller.handleCommand(owner, "setbounty", "");
-    await s.controller.handleCallback(owner, "bts:any");
+    await s.controller.handleText(owner, "reward-ready");
     await s.controller.handleText(owner, "flipkart");
     await s.controller.handleCallback(owner, "bpr:0");
     await s.controller.handleCallback(owner, "btc:1");
@@ -117,7 +122,7 @@ describe("/setbounty", () => {
 
 describe("/review, /bounties, /myrewards, /repositories", () => {
   it("/review collects fresh evidence, submits it, and shows the engine's score; payment is never started", async () => {
-    s.engine.mockScore = { total: 64, max: 100, breakdown: [{ category: "Correctness", score: 20, max: 30 }] };
+    s.engine.mockScore = { score: 64, subscores: { correctness: 20, tests: 15, feedback: 14, maintainability: 10, security: 5 } };
     const res = await s.controller.handleCommand(owner, "review", "42");
     expect(textOf(res)).toContain("PR #42");
     expect(textOf(res)).toContain("Total: 64/100");
@@ -141,22 +146,23 @@ describe("/review, /bounties, /myrewards, /repositories", () => {
     expect(textOf(list)).toContain("81/100");
     expect(textOf(list)).toContain("provisional");
     const view = await s.controller.handleCallback(owner, buttonData(list).find((d) => d.startsWith("rv:"))!);
-    expect(cbText(view)).toContain("Correctness: 24/30");
+    expect(cbText(view)).toContain("Correctness / issue alignment: 24/30");
   });
 
   it("/repositories lists connected repos with bounty status and the right action button", async () => {
-    s.engine.bountyRules.set("r1", { id: "r1", status: "active", repositoryId: "4242", ownerChatId: "1001" });
     const res = await s.controller.handleCommand(owner, "repositories", "");
     expect(textOf(res)).toContain("acme/app");
-    expect(textOf(res)).toContain("ACTIVE");
-    expect(buttonData(res)).toEqual(expect.arrayContaining(["sb:4242", "bp:r1"]));
+    expect(textOf(res)).toContain("ENABLED");
+    expect(buttonData(res)).toEqual(expect.arrayContaining(["sb:4242", "bp:rule-1"]));
   });
 
   it("/myrewards shows only the linked contributor's own outcomes and never a redemption code", async () => {
-    s.engine.mockFinalStatus = "delivered";
+    s.engine.mockReceiptStatus = "DELIVERED";
+    s.engine.mockReceiptInvoice = "MOCK-INV-BOUNTY";
+    s.engine.mockReceiptOrders = [{ id: "o1", status: "delivered" }];
     await s.deliver("pull_request", prPayload({ action: "opened" }), "d1");
     await s.pipeline.idle();
-    s.gh.setPr("acme/app", 42, { headSha: "sha-head-1", merged: true });
+    s.gh.setPr("acme/app", 42, { headSha: sha("a"), merged: true });
     await s.deliver("pull_request", prPayload({ action: "closed", merged: true }), "d2");
     await s.pipeline.idle();
 
@@ -165,7 +171,8 @@ describe("/review, /bounties, /myrewards, /repositories", () => {
     s.store.setLink("3003", { githubUserId: "7777", githubLogin: "someone", linkedAt: "x" });
     const mine = textOf(await s.controller.handleCommand(contributor, "myrewards", ""));
     expect(mine).toContain("PR #42");
-    expect(mine).toContain("delivered (invoice");
+    expect(mine).toContain("Bounty delivered.");
+    expect(mine).toContain("MOCK-INV-BOUNTY");
     expect(mine).not.toMatch(/MOCK-CODE|redemption code/i);
     const theirs = textOf(await s.controller.handleCommand({ userId: "3003", chatId: "3003", chatType: "private" }, "myrewards", ""));
     expect(theirs).toContain("No rewards yet");

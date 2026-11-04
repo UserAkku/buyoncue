@@ -1,19 +1,25 @@
 import { z } from "zod";
 import {
   type BountyEngineApi,
+  type BountyReceipt,
   type BountyRule,
   BountyRuleSchema,
   type ConnectedRepository,
   ConnectedRepositorySchema,
   type ConnectRepositoryBody,
-  type ContributionReview,
-  ContributionReviewSchema,
   type CreateBountyRuleBody,
+  type EngineEvidence,
   type FinalizeBody,
+  type FinalizeResult,
+  FinalizeResultSchema,
   type GithubLink,
   GithubLinkSchema,
   type LinkGithubBody,
-  type SubmitReviewBody,
+  ReceiptSchema,
+  type ReviewView,
+  ReviewViewSchema,
+  type SubmitResult,
+  SubmitResultSchema,
 } from "./bounty-types.js";
 import {
   type CreateRuleBody,
@@ -38,6 +44,7 @@ export class EngineError extends Error {
     public readonly kind: EngineErrorKind,
     message: string,
     public readonly status?: number,
+    public readonly code?: string,
   ) {
     super(message);
     this.name = "EngineError";
@@ -92,12 +99,12 @@ export class EngineClient implements EngineApi, BountyEngineApi {
       }
     }
 
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
       throw new EngineError("unauthorized", "Engine rejected the internal API token", res.status);
     }
     if (!res.ok) {
       const detail = extractErrorMessage(json) ?? `HTTP ${res.status}`;
-      throw new EngineError("http", detail, res.status);
+      throw new EngineError("http", detail, res.status, extractErrorCode(json));
     }
     return json;
   }
@@ -181,10 +188,16 @@ export class EngineClient implements EngineApi, BountyEngineApi {
     await this.request("POST", `/v1/notifications/${encodeURIComponent(id)}/ack`, {});
   }
 
-  // ---- AI bounty endpoints (see bounty-types.ts)
+  // ---- AI bounty endpoints (canonical schemas: services/engine/BOUNTY_API.md)
 
   async linkGithub(body: LinkGithubBody): Promise<GithubLink> {
-    const json = await this.request("POST", "/v1/github/links", body);
+    const json = await this.request("POST", "/v1/github/links", {
+      telegramUserId: body.telegramUserId,
+      githubUserId: wireId(body.githubUserId, "githubUserId"),
+      githubLogin: body.githubLogin,
+      verificationSource: "github_oauth",
+      verifiedAt: body.verifiedAt,
+    });
     return this.parse(z.object({ link: GithubLinkSchema }), json, "github link").link;
   }
 
@@ -193,44 +206,104 @@ export class EngineClient implements EngineApi, BountyEngineApi {
   }
 
   async connectRepository(body: ConnectRepositoryBody): Promise<ConnectedRepository> {
-    const json = await this.request("POST", "/v1/repositories/connect", body);
-    return this.parse(z.object({ repository: ConnectedRepositorySchema }), json, "repository").repository;
+    const json = await this.request("POST", "/v1/repositories/connect", {
+      ownerTelegramUserId: body.ownerTelegramUserId,
+      repositoryId: wireId(body.repositoryId, "repositoryId"),
+      repositoryFullName: body.repositoryFullName,
+      installationId: wireId(body.installationId, "installationId"),
+      // The caller verified admin rights through GitHub's API using the installation token just before this call.
+      verifiedOwnerAccess: true,
+      repositoryPrivate: body.repositoryPrivate,
+    });
+    return toRepository(this.parse(z.object({ repository: ConnectedRepositorySchema }), json, "repository").repository, null);
   }
 
-  async listRepositories(ownerChatId: string): Promise<ConnectedRepository[]> {
-    const json = await this.request("GET", `/v1/repositories?${new URLSearchParams({ ownerChatId })}`);
-    return this.parse(z.object({ repositories: z.array(ConnectedRepositorySchema) }), json, "repositories").repositories;
-  }
-
-  async disconnectRepository(repositoryId: string, reason: string): Promise<void> {
-    await this.request("POST", `/v1/repositories/${encodeURIComponent(repositoryId)}/disconnect`, { reason });
+  async listRepositories(ownerTelegramUserId: string): Promise<ConnectedRepository[]> {
+    const qs = new URLSearchParams({ ownerTelegramUserId });
+    const [repos, rules] = await Promise.all([
+      this.request("GET", `/v1/repositories?${qs}`),
+      this.request("GET", `/v1/bounty-rules?${qs}`),
+    ]);
+    const repositories = this.parse(z.object({ repositories: z.array(ConnectedRepositorySchema) }), repos, "repositories").repositories;
+    const policies = this.parse(z.object({ rules: z.array(BountyRuleSchema) }), rules, "bounty rules").rules;
+    return repositories.map((r) => toRepository(r, policies.find((p) => String(p.repositoryId) === r.repositoryId) ?? null));
   }
 
   async createBountyRule(body: CreateBountyRuleBody): Promise<BountyRule> {
-    const json = await this.request("POST", "/v1/bounty-rules", body);
-    return this.parse(z.object({ bountyRule: BountyRuleSchema }), json, "bounty rule").bountyRule;
+    const json = await this.request("POST", "/v1/bounty-rules", {
+      ownerTelegramUserId: body.ownerTelegramUserId,
+      repositoryId: wireId(body.repositoryId, "repositoryId"),
+      requiredLabel: body.requiredLabel,
+      mode: "ai_contribution_bounty",
+      requireMerged: true,
+      requireSuccessfulCI: body.requireSuccessfulCI,
+      scoreThreshold: body.scoreThreshold,
+      tiers: body.tiers,
+      autoApproveUpToUsdCents: body.autoApproveUpToUsdCents,
+      perPurchaseCapUsdCents: body.perPurchaseCapUsdCents,
+      dailyCapUsdCents: body.dailyCapUsdCents,
+      monthlyCapUsdCents: body.monthlyCapUsdCents,
+      allowSelfReward: body.allowSelfReward,
+    });
+    return this.parse(z.object({ rule: BountyRuleSchema }), json, "bounty rule").rule;
   }
 
-  async bountyRuleAction(id: string, action: "enable" | "pause" | "resume", ownerChatId: string): Promise<BountyRule | null> {
-    const json = await this.request("POST", `/v1/bounty-rules/${encodeURIComponent(id)}/${action}`, { ownerChatId });
-    const r = z.object({ bountyRule: BountyRuleSchema }).safeParse(json);
-    return r.success ? r.data.bountyRule : null;
+  async bountyRuleAction(ruleId: string, action: "enable" | "pause" | "resume", ownerChatId: string): Promise<{ id: string; status: string } | null> {
+    const rule = await this.ruleAction(action, ruleId, ownerChatId);
+    return rule ? { id: rule.id, status: rule.status } : null;
   }
 
-  async submitReview(body: SubmitReviewBody): Promise<ContributionReview> {
-    const json = await this.request("POST", "/v1/contributions/review", body);
-    return this.parse(z.object({ review: ContributionReviewSchema }), json, "review").review;
+  async submitReview(evidence: EngineEvidence): Promise<SubmitResult> {
+    const json = await this.request("POST", "/v1/contributions/review", {
+      ...evidence,
+      installationId: wireId(evidence.installationId, "installationId"),
+      repositoryId: wireId(evidence.repositoryId, "repositoryId"),
+      authorGithubUserId: wireId(evidence.authorGithubUserId, "authorGithubUserId"),
+      reviews: evidence.reviews.map((r) => ({ ...r, reviewerGithubUserId: wireId(r.reviewerGithubUserId, "reviewerGithubUserId") })),
+      maintainerAuthorization: evidence.maintainerAuthorization
+        ? { ...evidence.maintainerAuthorization, actorGithubUserId: wireId(evidence.maintainerAuthorization.actorGithubUserId, "actorGithubUserId") }
+        : null,
+    });
+    return this.parse(SubmitResultSchema, json, "review submission");
   }
 
-  async getReview(reviewId: string): Promise<ContributionReview> {
+  async getReview(reviewId: string): Promise<ReviewView> {
     const json = await this.request("GET", `/v1/contributions/${encodeURIComponent(reviewId)}`);
-    return this.parse(z.object({ review: ContributionReviewSchema }), json, "review").review;
+    return this.parse(ReviewViewSchema, json, "review");
   }
 
-  async finalizeReview(reviewId: string, body: FinalizeBody): Promise<ContributionReview> {
-    const json = await this.request("POST", `/v1/contributions/${encodeURIComponent(reviewId)}/finalize`, body);
-    return this.parse(z.object({ review: ContributionReviewSchema }), json, "review").review;
+  async finalizeReview(reviewId: string, body: FinalizeBody): Promise<FinalizeResult> {
+    const json = await this.request("POST", `/v1/contributions/${encodeURIComponent(reviewId)}/finalize`, { ...body, repositoryId: wireId(body.repositoryId, "repositoryId") });
+    return this.parse(FinalizeResultSchema, json, "finalization");
   }
+
+  async getReceipt(purchaseId: string): Promise<BountyReceipt> {
+    const json = await this.request("GET", `/v1/bounty-receipts/${encodeURIComponent(purchaseId)}`);
+    return this.parse(z.object({ receipt: ReceiptSchema }), json, "bounty receipt").receipt;
+  }
+}
+
+/** GitHub IDs are strings inside this service and positive safe integers on the engine wire. */
+function wireId(value: string, field: string): number {
+  const n = Number(value);
+  if (!/^\d{1,16}$/.test(value) || !Number.isSafeInteger(n) || n <= 0) throw new EngineError("invalid_response", `Refusing to send an invalid ${field}`);
+  return n;
+}
+
+function toRepository(r: z.infer<typeof ConnectedRepositorySchema>, rule: BountyRule | null): ConnectedRepository {
+  return {
+    repositoryId: r.repositoryId,
+    installationId: r.installationId,
+    fullName: r.repositoryFullName,
+    status: "connected",
+    bountyRule: rule ? { id: rule.id, status: rule.status, name: rule.name ?? null, requiredLabel: rule.requiredLabel ?? null, ownerGithubUserId: rule.ownerGithubUserId ?? null } : null,
+  };
+}
+
+function extractErrorCode(json: unknown): string | undefined {
+  const e = json && typeof json === "object" ? (json as Record<string, unknown>).error : undefined;
+  const c = e && typeof e === "object" ? (e as Record<string, unknown>).code : undefined;
+  return typeof c === "string" ? c.slice(0, 80) : undefined;
 }
 
 function extractErrorMessage(json: unknown): string | null {

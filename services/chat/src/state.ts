@@ -15,14 +15,21 @@ const ReviewRecordSchema = z.object({
   headSha: z.string(),
   authorGithubId: z.string(),
   authorLogin: z.string(),
-  deliveryId: z.string(),
   createdAt: z.string(),
-  purpose: z.enum(["provisional", "final"]),
+  /** True when this review was built from the merged PR (the only kind that can be finalized). */
+  merged: z.boolean().default(false),
   /** Evidence completeness as measured by the collector at submit time. */
   incompleteReasons: z.array(z.string()).default([]),
+  /** Hash of the submitted evidence (without its timestamp), used to avoid re-submitting unchanged PRs. */
+  fingerprint: z.string().default(""),
   supersededBy: z.string().nullish(),
   finalizedAt: z.string().nullish(),
+  /** The engine purchase created for this PR, if its reward was authorized. */
+  purchaseId: z.string().nullish(),
 });
+
+/** A maintainer's label event recorded from a signed webhook: binds the label to the PR head at that moment. */
+const LabelAuthSchema = z.object({ actorGithubUserId: z.string(), headSha: z.string(), label: z.string(), authorizedAt: z.string() });
 
 const LinkSchema = z.object({ githubUserId: z.string(), githubLogin: z.string(), linkedAt: z.string() });
 
@@ -40,10 +47,12 @@ const StateSchema = z.object({
   reviews: z.record(z.string(), ReviewRecordSchema).default({}),
   latestByPr: z.record(z.string(), z.string()).default({}),
   links: z.record(z.string(), LinkSchema).default({}),
+  labelAuths: z.record(z.string(), LabelAuthSchema).default({}),
   repos: z.record(z.string(), RepoSchema).default({}),
 });
 
 export type ReviewRecord = z.infer<typeof ReviewRecordSchema>;
+export type LabelAuthRecord = z.infer<typeof LabelAuthSchema>;
 export type LinkRecord = z.infer<typeof LinkSchema>;
 export type RepoRecord = z.infer<typeof RepoSchema>;
 type StateData = z.infer<typeof StateSchema>;
@@ -112,10 +121,11 @@ export class StateStore {
       this.persist();
     }
   }
-  markFinalized(reviewId: string, at: string): void {
+  markFinalized(reviewId: string, at: string, purchaseId?: string | null): void {
     const r = this.data.reviews[reviewId];
     if (r) {
       r.finalizedAt = at;
+      if (purchaseId) r.purchaseId = purchaseId;
       this.persist();
     }
   }
@@ -124,6 +134,20 @@ export class StateStore {
       .filter(filter)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit);
+  }
+
+  // -- maintainer label events (one per PR; a newer event replaces the older)
+  setLabelAuth(repositoryId: string, prNumber: number, a: LabelAuthRecord): void {
+    this.data.labelAuths[prKey(repositoryId, prNumber)] = a;
+    const keys = Object.keys(this.data.labelAuths);
+    if (keys.length > MAX_REVIEWS) delete this.data.labelAuths[keys[0]!];
+    this.persist();
+  }
+  getLabelAuth(repositoryId: string, prNumber: number): LabelAuthRecord | undefined {
+    return this.data.labelAuths[prKey(repositoryId, prNumber)];
+  }
+  clearLabelAuth(repositoryId: string, prNumber: number): void {
+    if (delete this.data.labelAuths[prKey(repositoryId, prNumber)]) this.persist();
   }
 
   // -- identity links (telegramUserId -> github)

@@ -89,7 +89,7 @@ export async function assertBountyPurchase(c:Sql,purchaseId:string) {
     v.valid_until>now() AS fresh,l.telegram_user_id,r.installation_id=v.installation_id AS installation_matches
     FROM bounty_awards a JOIN contribution_reviews v ON v.id=a.review_id
     JOIN connected_repositories r ON r.repository_id=a.repository_id
-    LEFT JOIN github_identity_links l ON l.github_user_id=a.author_github_user_id
+    LEFT JOIN github_identity_links l ON l.github_user_id=a.author_github_user_id AND l.revoked_at IS NULL
     WHERE a.purchase_id=$1 FOR UPDATE OF v`,[purchaseId]);
   const a=rows[0];
   if(!a||a.state!=='REVIEWED'||a.eligibility_state!=='ELIGIBLE'||!a.fresh||!a.installation_matches||a.head_sha!==a.reviewed_head_sha||a.telegram_user_id!==a.recipient_chat_id)throw new AppError('BOUNTY_REVIEW_NOT_AUTHORIZED','Bounty review is stale, held, expired or identity changed');

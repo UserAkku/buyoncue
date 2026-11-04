@@ -6,6 +6,7 @@ export const sha=z.string().regex(/^(?:[a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/).trans
 const date=z.string().datetime({offset:true});
 const login=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?$/).max(100);
 export const linkSchema=z.object({telegramUserId:privateChatId,githubUserId:githubId,githubLogin:login,verificationSource:z.literal('github_oauth'),verifiedAt:date}).strict();
+export const unlinkSchema=z.object({telegramUserId:privateChatId}).strict();
 export const connectSchema=z.object({ownerTelegramUserId:privateChatId,repositoryId:githubId,repositoryFullName:repoName,installationId:githubId,verifiedOwnerAccess:z.literal(true),repositoryPrivate:z.boolean().default(true)}).strict();
 export const tierSchema=z.object({minScore:z.number().int().min(0).max(100),maxScore:z.number().int().min(0).max(100),faceValueINR:z.number().int().positive().max(1_000_000),productId:z.string().min(1).max(500),packageId:z.string().min(1).max(500),requiresApproval:z.boolean().default(false)}).strict();
 export const bountyRuleSchema=z.object({

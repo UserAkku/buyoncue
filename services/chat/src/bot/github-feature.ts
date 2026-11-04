@@ -4,7 +4,7 @@ import type { BountyEngineApi, BountyTier, ConnectedRepository } from "../engine
 import type { EngineApi, Product } from "../engine/types.js";
 import { bold, code, esc } from "../html.js";
 import type { GithubApp } from "../github/app.js";
-import { renderReview } from "../github/format.js";
+import { describeReceipt, renderReview } from "../github/format.js";
 import type { GithubPipeline } from "../github/pipeline.js";
 import type { LinkSession, LinkSessions, VerifiedIdentity, VerifiedRepo } from "../github/sessions.js";
 import type { Logger } from "../logger.js";
@@ -24,6 +24,8 @@ export const OWNER_CALLBACKS = new Set(["sr", "sb", "be", "bp", "br", "rv", "bpr
 const CANCEL_ROW: Button[] = [{ text: "✖️ Cancel", data: "cancel" }];
 const FLOW_TTL_MS = 30 * 60_000;
 const PICK_TTL_MS = 10 * 60_000;
+/** The engine never rewards scores below 50. */
+const MIN_REWARD_SCORE = 50;
 
 const CAP_ORDER: { step: BStep; key: CapKey; title: string }[] = [
   { step: "cap_per", key: "perPurchaseCapUsdCents", title: `💳 ${bold("Per-reward hard cap")} (USD): the most one reward purchase may cost. Anything above is blocked.` },
@@ -254,13 +256,20 @@ export class GithubFeature {
       return [{ text: `🔒 You need admin rights on ${code(live.fullName)} to create bounty policies for it (GitHub reports: ${esc(role ?? "no access")}). Nothing was connected.` }];
     }
 
-    await this.d.engine.connectRepository({
-      ownerChatId: a.userId,
-      authorizedByGithubUserId: pick.githubUserId,
-      installationId: repo.installationId,
-      repositoryId: repo.repositoryId,
-      fullName: live.fullName,
-    });
+    try {
+      await this.d.engine.connectRepository({
+        ownerTelegramUserId: a.userId,
+        installationId: repo.installationId,
+        repositoryId: repo.repositoryId,
+        repositoryFullName: live.fullName,
+        repositoryPrivate: live.private,
+      });
+    } catch (err) {
+      if (err instanceof EngineError && err.kind === "http" && (err.status === 403 || err.status === 409)) {
+        return [{ text: `🔒 The engine refused to connect ${code(live.fullName)} (${esc(err.code ?? String(err.status))}). Nothing was connected. If this says the owner isn't verified, run /connectgithub again.` }];
+      }
+      throw err;
+    }
     this.d.store.setRepo({ repositoryId: repo.repositoryId, installationId: repo.installationId, fullName: live.fullName, ownerChatId: a.userId, status: "connected" });
     this.picks.delete(a.chatId);
     this.d.logger.info("repository_connected", { repositoryId: repo.repositoryId });
@@ -322,9 +331,9 @@ export class GithubFeature {
   private async runReview(a: Actor, repo: { repositoryId: string; installationId: string; fullName: string }, prNumber: number): Promise<Reply[]> {
     this.flows.delete(a.chatId);
     try {
-      const { record, review, reused } = await this.d.pipeline.review(repo, prNumber, `manual:${this.now()}:${prNumber}`, "provisional");
+      const { record, view, reused } = await this.d.pipeline.review({ ...repo, ownerChatId: a.userId }, prNumber);
       const note = reused ? "" : "\n\n<i>New evidence collected from GitHub and submitted for review.</i>";
-      return [{ text: renderReview(review, record) + note, buttons: [[{ text: "👁 View review", data: `rv:${record.reviewId}` }]] }];
+      return [{ text: renderReview(view, record) + note, buttons: [[{ text: "👁 View review", data: `rv:${record.reviewId}` }]] }];
     } catch (err) {
       if ((err as { status?: number }).status === 404) return [{ text: `PR #${prNumber} wasn't found in ${code(repo.fullName)}.` }];
       throw err;
@@ -333,7 +342,7 @@ export class GithubFeature {
 
   private async viewReview(reviewId: string): Promise<Reply[]> {
     const review = await this.d.engine.getReview(reviewId);
-    const rec = this.d.store.getReview(reviewId) ?? { prNumber: review.prNumber ?? 0, repositoryFullName: "unknown repository", incompleteReasons: [] };
+    const rec = this.d.store.getReview(reviewId) ?? { prNumber: review.prNumber ?? 0, repositoryFullName: "unknown repository", incompleteReasons: [], merged: false };
     return [{ text: renderReview(review, rec) }];
   }
 
@@ -349,13 +358,15 @@ export class GithubFeature {
     const head = `PR #${r.prNumber} · ${code(r.repositoryFullName)}`;
     try {
       const rv = await this.d.engine.getReview(r.reviewId);
-      const score = rv.score ? `${rv.score.total}/${rv.score.max}` : rv.status;
-      const f = rv.finalization;
-      let outcome = rv.provisional === false || f ? "" : " · provisional";
-      if (f) {
-        outcome = ` · ${f.status.toLowerCase() === "delivered" && f.invoiceId ? `delivered (invoice ${code(f.invoiceId)})` : esc(f.status)}`;
+      const score = rv.score !== null && rv.score !== undefined ? `${rv.score}/100` : rv.state.toLowerCase();
+      const tier = rv.candidateTier ? ` · Tier ${rv.candidateTier.tier} (₹${rv.candidateTier.faceValueINR})` : "";
+      let outcome = r.finalizedAt ? " · finalized, no reward" : r.merged ? " · merged, verifying" : " · provisional";
+      if (r.purchaseId) {
+        const receipt = await this.d.engine.getReceipt(r.purchaseId).catch(() => null);
+        outcome = receipt ? ` · ${describeReceipt(receipt).replace(/<\/?b>/g, "")}` : " · reward authorized";
       }
-      return `• ${head} · ${esc(score)}${rv.candidateTier ? ` · ${esc(rv.candidateTier)}` : ""}${outcome}`;
+      const hold = rv.eligibilityState === "HOLD" && rv.reasons.length ? ` · HOLD: ${esc(rv.reasons.slice(0, 2).join(", "))}` : "";
+      return `• ${head} · ${esc(score)}${tier}${outcome}${hold}`;
     } catch {
       return `• ${head} · status unavailable right now`;
     }
@@ -376,8 +387,8 @@ export class GithubFeature {
     this.flows.set(a.chatId, { kind: "bounty", repo, step: "label", products: [], tiers: [], caps: {}, touchedAt: this.now() });
     return [
       {
-        text: `🏆 Bounty policy for ${code(repo.fullName)}.\nWhich PR label makes a merged PR eligible? Send the label name, or tap “Any merged PR”.`,
-        buttons: [[{ text: "Any merged PR", data: "bts:any" }], CANCEL_ROW],
+        text: `🏆 Bounty policy for ${code(repo.fullName)}.\nWhich PR label makes a merged PR eligible? Send the label name, e.g. ${code("reward-ready")}. You (the connected maintainer) must apply it, or approve the exact commit, for a PR to count.`,
+        buttons: [CANCEL_ROW],
       },
     ];
   }
@@ -400,15 +411,14 @@ export class GithubFeature {
       }
       case "product_query":
       case "product_pick": {
-        const { query, country } = parseProductQuery(text);
+        const { query } = parseProductQuery(text);
         if (!query) return [{ text: "Send a brand to search, e.g. flipkart.", buttons: [CANCEL_ROW] }];
         f.productQuery = query;
-        f.country = country ?? f.country;
         return this.searchProducts(f);
       }
       case "tier_score": {
         const n = Number(text.trim());
-        return Number.isInteger(n) ? this.setTierScore(f, n) : [{ text: "Send a whole number between 1 and 100.", buttons: [CANCEL_ROW] }];
+        return Number.isInteger(n) ? this.setTierScore(f, n) : [{ text: `Send a whole number between ${MIN_REWARD_SCORE} and 100.`, buttons: [CANCEL_ROW] }];
       }
       case "cap_per":
       case "cap_daily":
@@ -429,14 +439,14 @@ export class GithubFeature {
     f.step = step;
     switch (step) {
       case "product_query":
-        return [{ text: `🎁 Which gift card should rewards be paid in? Send a brand to search the live catalog, e.g. ${code("flipkart")} or ${code("amazon US")} (default country IN).`, buttons: [CANCEL_ROW] }];
+        return [{ text: `🎁 Which gift card should rewards be paid in? Send a brand to search the live Indian catalog, e.g. ${code("flipkart")}. Bounties are paid in INR gift cards verified against Bitrefill's India catalog.`, buttons: [CANCEL_ROW] }];
       case "tier_count":
         return [{ text: "How many reward tiers? (Higher scores unlock higher tiers.)", buttons: [[1, 2, 3].map((n) => ({ text: String(n), data: `btc:${n}` })), CANCEL_ROW] }];
       case "tier_score": {
         const idx = f.tiers.length + 1;
-        const prev = f.tiers.at(-1)?.minScore ?? 0;
-        const presets = [60, 75, 90].filter((s) => s > prev);
-        return [{ text: `🏅 ${bold(`Tier ${idx}`)}: minimum AI score (1–100, above ${prev}) to earn it.`, buttons: [presets.map((s) => ({ text: String(s), data: `bts:${s}` })), CANCEL_ROW] }];
+        const prev = f.tiers.at(-1)?.minScore ?? MIN_REWARD_SCORE - 1;
+        const presets = [50, 70, 85].filter((s) => s > prev);
+        return [{ text: `🏅 ${bold(`Tier ${idx}`)}: minimum AI score (${prev + 1}–100) to earn it. Rewards start at ${MIN_REWARD_SCORE}; scores of 85 or more always need your approval.`, buttons: [presets.map((s) => ({ text: String(s), data: `bts:${s}` })), CANCEL_ROW] }];
       }
       case "tier_package": {
         const product = f.product!;
@@ -451,13 +461,13 @@ export class GithubFeature {
   }
 
   private async searchProducts(f: BountyFlow): Promise<Reply[]> {
-    const country = f.country ?? "IN";
+    const country = "IN";
     const found = await this.d.engine.searchProducts(f.productQuery!, country);
-    const inStock = found.filter((p) => p.inStock && p.packages.length > 0).slice(0, 8);
+    const inStock = found.filter((p) => p.inStock && p.packages.length > 0 && p.country === "IN" && p.currency === "INR").slice(0, 8);
     if (!inStock.length) {
       const tried = f.productQuery!;
       f.productQuery = undefined;
-      return [{ text: `No in-stock gift cards for “${esc(tried)}” in ${country}. Try another brand or country (e.g. ${code("amazon US")}).`, buttons: [CANCEL_ROW] }];
+      return [{ text: `No in-stock gift cards for “${esc(tried)}” in ${country}. Try another brand.`, buttons: [CANCEL_ROW] }];
     }
     f.step = "product_pick";
     f.products = inStock;
@@ -465,8 +475,8 @@ export class GithubFeature {
   }
 
   private setTierScore(f: BountyFlow, score: number): Promise<Reply[]> | Reply[] {
-    const prev = f.tiers.at(-1)?.minScore ?? 0;
-    if (score <= prev || score > 100) return [{ text: `The score must be between ${prev + 1} and 100 (higher than the previous tier).`, buttons: [CANCEL_ROW] }];
+    const prev = f.tiers.at(-1)?.minScore ?? MIN_REWARD_SCORE - 1;
+    if (score <= prev || score > 100) return [{ text: `The score must be between ${prev + 1} and 100 (higher than the previous tier, and at least ${MIN_REWARD_SCORE}).`, buttons: [CANCEL_ROW] }];
     f.pendingScore = score;
     return this.bountyNext({ userId: "", chatId: "", chatType: "private" }, f, "tier_package");
   }
@@ -499,31 +509,41 @@ export class GithubFeature {
       throw err;
     });
     if (!fresh.inStock) throw new UserFacingError(`${fresh.name} is out of stock right now. Nothing was created.`);
+    if (fresh.country !== "IN" || fresh.currency !== "INR") throw new UserFacingError("Bounties can only be paid in Indian (INR) gift cards. Nothing was created.");
+    if (!f.requiredLabel) throw new UserFacingError("A required label is needed. Nothing was created.");
     const tiers: BountyTier[] = f.tiers.map((t, i) => {
-      if (!fresh.packages.some((p) => p.packageId === t.packageId)) throw new UserFacingError("A selected package isn't offered any more. Nothing was created.");
-      return { name: `Tier ${i + 1}`, minScore: t.minScore, productId: fresh.id, packageId: t.packageId };
+      const pkg = fresh.packages.find((p) => p.packageId === t.packageId);
+      if (!pkg || !Number.isInteger(pkg.value)) throw new UserFacingError("A selected package isn't offered any more. Nothing was created.");
+      const next = f.tiers[i + 1];
+      return { minScore: t.minScore, maxScore: next ? next.minScore - 1 : 100, faceValueINR: pkg.value, productId: fresh.id, packageId: t.packageId, requiresApproval: t.minScore >= 85 };
     });
     const c = f.caps;
     const rule = await this.d.engine.createBountyRule({
-      ownerChatId: a.userId,
+      ownerTelegramUserId: a.userId,
       repositoryId: f.repo.repositoryId,
-      name: `${f.repo.fullName} rewards`.slice(0, 80),
-      requiredLabel: f.requiredLabel ?? null,
+      requiredLabel: f.requiredLabel,
+      requireSuccessfulCI: true,
+      scoreThreshold: f.tiers[0]!.minScore,
       tiers,
       perPurchaseCapUsdCents: c.perPurchaseCapUsdCents!,
       dailyCapUsdCents: c.dailyCapUsdCents!,
       monthlyCapUsdCents: c.monthlyCapUsdCents!,
       autoApproveUpToUsdCents: c.autoApproveUpToUsdCents!,
+      allowSelfReward: false,
+    }).catch((err) => {
+      if (err instanceof EngineError && err.kind === "http" && err.status === 409) throw new UserFacingError("This repository already has a bounty policy. Policies are immutable in this version; pause it from /repositories instead. Nothing was created.");
+      if (err instanceof EngineError && err.kind === "http" && err.status && err.status >= 400 && err.status < 500) throw new UserFacingError(`The engine rejected this policy (${err.code ?? err.status}). Nothing was created.`);
+      throw err;
     });
     this.flows.delete(a.chatId);
-    const tierLines = f.tiers.map((t, i) => `Tier ${i + 1}: score ≥ ${t.minScore} → ${esc(fresh.name)} ${formatDenomination(t.value, fresh.currency)}`);
+    const tierLines = tiers.map((t, i) => `Tier ${i + 1}: score ${t.minScore}–${t.maxScore} → ${esc(fresh.name)} ${formatDenomination(t.faceValueINR, "INR")}${t.requiresApproval ? " (needs your approval)" : ""}`);
     return [
       {
         text: [
           `✅ Your bounty policy is ready to review.`,
           ``,
           `🏆 ${bold(f.repo.fullName)} — ${bold(rule.status.toUpperCase())}`,
-          `<b>Eligible PRs:</b> ${f.requiredLabel ? `merged with label ${code(f.requiredLabel)}` : "any merged PR"}`,
+          `<b>Eligible PRs:</b> merged, label ${code(f.requiredLabel)} applied or commit approved by you, all required CI green`,
           ...tierLines,
           `<b>Limits (USD):</b> ${formatUsd(c.perPurchaseCapUsdCents!)} per reward · ${formatUsd(c.dailyCapUsdCents!)} daily · ${formatUsd(c.monthlyCapUsdCents!)} monthly`,
           c.autoApproveUpToUsdCents === 0 ? `<b>Approval:</b> every reward waits for your tap` : `<b>Approval:</b> up to ${formatUsd(c.autoApproveUpToUsdCents!)} automatic; above that I ask you first`,
@@ -579,10 +599,6 @@ export class GithubFeature {
     f.touchedAt = this.now();
     switch (kind) {
       case "bts":
-        if (arg === "any" && f.step === "label") {
-          f.requiredLabel = null;
-          return this.bountyNext(a, f, "product_query");
-        }
         if (f.step === "tier_score" && /^\d+$/.test(arg)) return this.setTierScore(f, Number(arg));
         return [{ text: "That option has expired." }];
       case "bpr": {

@@ -296,3 +296,29 @@ it('bounds durable review attempts per PR without calling the model again',async
  await setup();for(let i=0;i<3;i++)await reviewed(evidence({description:`Revision ${i}`}));
  const denied=await http('/v1/contributions/review',evidence({description:'Revision 4'}));expect(denied.status).toBe(409);expect(denied.data.error.code).toBe('REVIEW_CALL_LIMIT');expect(reviewer.calls).toHaveLength(3);
 });
+
+describe('Revoking a verified identity link',()=>{
+  const unlink=(tg:string)=>http('/v1/github/links/unlink',{telegramUserId:tg});
+  it('requires the bearer token, a private numeric Telegram ID and is idempotent',async()=>{
+    expect((await http('/v1/github/links/unlink',{telegramUserId:'456'},false)).status).toBe(401);
+    expect((await unlink('-100')).status).toBe(400);
+    await setup();expect((await unlink('456')).data).toEqual({unlinked:true});expect((await unlink('456')).data).toEqual({unlinked:false});
+  });
+  it('an unlinked contributor is held at finalization and never paid; re-linking the same identity restores eligibility',async()=>{
+    await setup();const r=await reviewed();expect((await unlink('456')).status).toBe(200);
+    const held=await finalize(r.reviewId);expect(held.data.accepted).toBe(false);expect(held.data.reasons).toContain('GITHUB_AUTHOR_NOT_LINKED');expect(payments.creates).toBe(0);
+    expect((await link()).status).toBe(201);expect((await finalize(r.reviewId)).data.accepted).toBe(true);
+  });
+  it('a revoked GitHub identity cannot be taken over by another Telegram user',async()=>{
+    await setup();await unlink('456');expect((await link('999',202)).status).toBe(409);
+  });
+  it('a queued purchase is not paid after its recipient unlinks',async()=>{
+    await setup();const r=await reviewed();expect((await finalize(r.reviewId)).data.accepted).toBe(true);await unlink('456');await engine.tick();
+    expect(payments.pays).toBe(0);
+  });
+  it('an unlinked maintainer cannot create policies or finalize rewards',async()=>{
+    await setup();const r=await reviewed();await unlink('123');
+    expect((await finalize(r.reviewId)).data.reasons).toContain('OWNER_IDENTITY_REVOKED');
+    expect((await http('/v1/bounty-rules',{...bountyInput,repositoryId:303})).status).toBeGreaterThanOrEqual(400);expect(payments.creates).toBe(0);
+  });
+});

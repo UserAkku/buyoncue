@@ -64,6 +64,7 @@ export function buildApp(engine: Engine, internalToken: string, bounties = new B
   });
   app.post('/v1/notifications/:id/ack',async request=>engine.ack(uuidParams.parse(request.params).id));
   app.post('/v1/github/links',async(request,reply)=>reply.code(201).send({link:await bounties.link(request.body)}));
+  app.post('/v1/github/links/unlink',async request=>bounties.unlink(request.body));
   app.post('/v1/repositories/connect',async(request,reply)=>reply.code(201).send({repository:await bounties.connect(request.body)}));
   app.get('/v1/repositories',async request=>{
     const {ownerTelegramUserId}=z.object({ownerTelegramUserId:privateChatId}).strict().parse(request.query);

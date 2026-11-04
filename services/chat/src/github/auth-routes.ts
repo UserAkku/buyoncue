@@ -158,7 +158,7 @@ export function registerGithubAuthRoutes(app: Express, d: AuthRouteDeps): void {
         githubUserId: identity.githubUserId,
         githubLogin: identity.githubLogin,
         telegramUserId: session.telegramUserId,
-        chatId: session.chatId,
+        verifiedAt: new Date().toISOString(),
       });
     } catch (err) {
       if (err instanceof EngineError && err.kind === "http" && err.status === 409) {

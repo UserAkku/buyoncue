@@ -1,3 +1,5 @@
+> **Superseded.** Claude Code took this work over on branch `integration/final-ai-bounty-release`; the chat↔engine contract gap described below is fixed. Current status: [FINAL_AI_INTEGRATION.md](FINAL_AI_INTEGRATION.md). Kept for history.
+
 # Codex → Claude Code handoff
 
 Handoff date: 4 November 2026. Development stopped at the owner's request; this is **not a release declaration**.

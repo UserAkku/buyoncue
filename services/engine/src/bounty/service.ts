@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { type Engine } from '../engine.js';
 import { type Db, type Sql, transaction, publicRow } from '../db.js';
 import { AppError } from '../errors.js';
-import { bountyRuleSchema, connectSchema, evidenceSchema, finalizeSchema, linkSchema, type Evidence, type Score, type Tier } from './schemas.js';
+import { bountyRuleSchema, connectSchema, evidenceSchema, finalizeSchema, linkSchema, unlinkSchema, type Evidence, type Score, type Tier } from './schemas.js';
 import { eligibility, evidenceHash, evidenceProblems, redact, references, selectTier, validateScore, type Policy } from './policy.js';
 import { type Reviewer } from './reviewer.js';
 interface RuleRow {
@@ -44,15 +44,23 @@ export class BountyService {
       const rows=(await c.query('SELECT * FROM github_identity_links WHERE telegram_user_id=$1 OR github_user_id=$2 FOR UPDATE',[x.telegramUserId,x.githubUserId])).rows;
       if(rows.some(r=>r.telegram_user_id!==x.telegramUserId||Number(r.github_user_id)!==x.githubUserId))throw new AppError('IDENTITY_CONFLICT','Verified identity is already linked to another account',409);
       const result=await c.query(`INSERT INTO github_identity_links(telegram_user_id,github_user_id,github_login,verification_source,verified_at)
-        VALUES($1,$2,$3,$4,$5) ON CONFLICT(telegram_user_id) DO UPDATE SET github_login=$3,verified_at=GREATEST(github_identity_links.verified_at,EXCLUDED.verified_at) WHERE github_identity_links.github_user_id=EXCLUDED.github_user_id RETURNING *`,[x.telegramUserId,x.githubUserId,x.githubLogin,x.verificationSource,x.verifiedAt]);
+        VALUES($1,$2,$3,$4,$5) ON CONFLICT(telegram_user_id) DO UPDATE SET github_login=$3,revoked_at=NULL,verified_at=GREATEST(github_identity_links.verified_at,EXCLUDED.verified_at) WHERE github_identity_links.github_user_id=EXCLUDED.github_user_id RETURNING *`,[x.telegramUserId,x.githubUserId,x.githubLogin,x.verificationSource,x.verifiedAt]);
       if(!result.rows[0])throw new AppError('IDENTITY_CONFLICT','Verified identity ownership conflicts',409);
       return {...publicRow(result.rows[0]),githubUserId:Number(result.rows[0].github_user_id)};
     }); } catch(error) {if((error as {code?:string}).code==='23505')throw new AppError('IDENTITY_CONFLICT','Verified identity ownership conflicts',409);throw error;}
   }
+  /** Soft-revokes a link: rewards stop immediately, history keeps its references. Idempotent. */
+  async unlink(raw:unknown) {
+    const x=unlinkSchema.parse(raw);
+    return transaction(this.db,async c=>{
+      const row=(await c.query('UPDATE github_identity_links SET revoked_at=now() WHERE telegram_user_id=$1 AND revoked_at IS NULL RETURNING telegram_user_id',[x.telegramUserId])).rows[0];
+      return {unlinked:!!row};
+    });
+  }
   async connect(raw:unknown) {
     const x=connectSchema.parse(raw);
     return transaction(this.db,async c=>{
-      const identity=(await c.query('SELECT * FROM github_identity_links WHERE telegram_user_id=$1 FOR UPDATE',[x.ownerTelegramUserId])).rows[0];
+      const identity=(await c.query('SELECT * FROM github_identity_links WHERE telegram_user_id=$1 AND revoked_at IS NULL FOR UPDATE',[x.ownerTelegramUserId])).rows[0];
       if(!identity)throw new AppError('OWNER_IDENTITY_NOT_VERIFIED','Maintainer must link GitHub through OAuth first',403);
       const old=(await c.query('SELECT * FROM connected_repositories WHERE repository_id=$1 FOR UPDATE',[x.repositoryId])).rows[0];
       if(old&&(old.owner_telegram_user_id!==x.ownerTelegramUserId||Number(old.installation_id)!==x.installationId||old.repository_private!==x.repositoryPrivate))throw new AppError('REPOSITORY_OWNERSHIP_CONFLICT','Repository owner, installation or visibility cannot be silently replaced',409);
@@ -66,7 +74,7 @@ export class BountyService {
   async repositories(owner:string) {return (await this.db.query('SELECT * FROM connected_repositories WHERE owner_telegram_user_id=$1 ORDER BY repository_id',[owner])).rows.map(r=>this.repoDTO(r));}
   async createRule(raw:unknown) {
     const x=bountyRuleSchema.parse(raw);
-    const repo=(await this.db.query('SELECT * FROM connected_repositories WHERE repository_id=$1 AND owner_telegram_user_id=$2',[x.repositoryId,x.ownerTelegramUserId])).rows[0];
+    const repo=(await this.db.query('SELECT r.* FROM connected_repositories r JOIN github_identity_links l ON l.telegram_user_id=r.owner_telegram_user_id AND l.revoked_at IS NULL WHERE r.repository_id=$1 AND r.owner_telegram_user_id=$2',[x.repositoryId,x.ownerTelegramUserId])).rows[0];
     if(!repo)throw new AppError('REPOSITORY_NOT_AUTHORIZED','Repository is not connected for this maintainer',403);
     const tiers:Tier[]=[];
     for(const t of [...x.tiers].sort((a,b)=>a.minScore-b.minScore)) {
@@ -155,7 +163,7 @@ export class BountyService {
         }
       }
       if(score) {
-        const linked=(await this.db.query('SELECT telegram_user_id FROM github_identity_links WHERE github_user_id=$1',[row.author_github_user_id])).rows[0];
+        const linked=(await this.db.query('SELECT telegram_user_id FROM github_identity_links WHERE github_user_id=$1 AND revoked_at IS NULL',[row.author_github_user_id])).rows[0];
         const decision=eligibility(row.snapshot,score,this.policy(rule),!!linked);reasons=decision.reasons;
         if(linked&&!this.engine.recipientAllowed(linked.telegram_user_id))reasons.push('RECIPIENT_NOT_PRELINKED');
         if(reasons.includes('LOW_CONFIDENCE'))state='LOW_CONFIDENCE';
@@ -203,12 +211,14 @@ export class BountyService {
       }
       const existing=(await c.query('SELECT id,purchase_id FROM bounty_awards WHERE rule_id=$1 AND repository_id=$2 AND pr_number=$3',[rule.id,input.repositoryId,input.prNumber])).rows[0];
       if(existing)return {accepted:true,reviewId:id,reason:'duplicate_pr',awardId:existing.id,purchaseId:existing.purchase_id};
-      const linked=(await c.query('SELECT * FROM github_identity_links WHERE github_user_id=$1',[row.author_github_user_id])).rows[0];
+      const linked=(await c.query('SELECT * FROM github_identity_links WHERE github_user_id=$1 AND revoked_at IS NULL',[row.author_github_user_id])).rows[0];
+      const ownerActive=(await c.query('SELECT 1 FROM github_identity_links WHERE github_user_id=$1 AND revoked_at IS NULL',[rule.owner_github_user_id])).rowCount===1;
       const decision=row.result?eligibility(row.snapshot,row.result,this.policy(rule),!!linked):{reasons:['REVIEW_NOT_READY'],candidate:null};
       const reasons=[...decision.reasons];
       if(row.state!=='REVIEWED')reasons.push('REVIEW_NOT_READY');
       if(!input.merged)reasons.push('NOT_MERGED');
       if(rule.status!=='enabled')reasons.push('RULE_NOT_ENABLED');
+      if(!ownerActive)reasons.push('OWNER_IDENTITY_REVOKED');
       if(row.valid_until.getTime()<=Date.now())reasons.push('EVIDENCE_EXPIRED');
       if(Number(row.installation_id)!==Number(rule.installation_id))reasons.push('INSTALLATION_CHANGED');
       if(linked&&!this.engine.recipientAllowed(linked.telegram_user_id))reasons.push('RECIPIENT_NOT_PRELINKED');

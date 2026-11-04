@@ -2,7 +2,7 @@
   "name": "pactpilot-baseline",
   "private": true,
   "scripts": {
-    "test:integration": "LIVE_PURCHASES_ENABLED=false services/engine/node_modules/.bin/tsx --test tests/integration/baseline.test.ts",
+    "test:integration": "LIVE_PURCHASES_ENABLED=false services/engine/node_modules/.bin/tsx --test tests/integration/baseline.test.ts tests/integration/ai-bounty-e2e.test.ts",
     "test": "npm --prefix services/engine test && npm --prefix services/chat test && npm run test:integration",
     "build": "npm --prefix services/engine run build && npm --prefix services/chat run build",
     "typecheck": "npm --prefix services/engine run typecheck && npm --prefix services/chat run typecheck && services/engine/node_modules/.bin/tsc -p tests/integration/tsconfig.json",

@@ -50,10 +50,10 @@ export class GithubApp {
   }
 
   /** Repositories the installation can currently access (paginated). */
-  async listInstallationRepositories(installationId: string): Promise<{ id: string; fullName: string }[]> {
+  async listInstallationRepositories(installationId: string): Promise<{ id: string; fullName: string; private: boolean }[]> {
     const octokit = await this.installationClient(installationId);
     const repos = await octokit.paginate("GET /installation/repositories", { per_page: 100 });
-    return repos.map((r) => ({ id: String(r.id), fullName: r.full_name }));
+    return repos.map((r) => ({ id: String(r.id), fullName: r.full_name, private: r.private }));
   }
 
   /** Exchanges an OAuth code server-side. Returns the short-lived user token. */
