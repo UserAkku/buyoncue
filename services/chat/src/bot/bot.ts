@@ -20,7 +20,7 @@ export function toKeyboard(buttons?: Button[][]): InlineKeyboard | undefined {
   if (!buttons?.length) return undefined;
   const kb = new InlineKeyboard();
   buttons.forEach((row, i) => {
-    row.forEach((b) => kb.text(b.text, b.data));
+    row.forEach((b) => (b.url ? kb.url(b.text, b.url) : kb.text(b.text, b.data ?? "nop")));
     if (i < buttons.length - 1) kb.row();
   });
   return kb;
@@ -28,7 +28,7 @@ export function toKeyboard(buttons?: Button[][]): InlineKeyboard | undefined {
 
 function actorOf(ctx: Context): Actor | null {
   if (!ctx.from || !ctx.chat) return null;
-  return { userId: String(ctx.from.id), chatId: String(ctx.chat.id), chatType: ctx.chat.type };
+  return { userId: String(ctx.from.id), chatId: String(ctx.chat.id), chatType: ctx.chat.type, displayName: ctx.from.first_name };
 }
 
 async function sendReplies(ctx: Context, replies: Reply[]): Promise<void> {

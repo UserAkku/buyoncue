@@ -1,5 +1,21 @@
 import { z } from "zod";
 import {
+  type BountyEngineApi,
+  type BountyRule,
+  BountyRuleSchema,
+  type ConnectedRepository,
+  ConnectedRepositorySchema,
+  type ConnectRepositoryBody,
+  type ContributionReview,
+  ContributionReviewSchema,
+  type CreateBountyRuleBody,
+  type FinalizeBody,
+  type GithubLink,
+  GithubLinkSchema,
+  type LinkGithubBody,
+  type SubmitReviewBody,
+} from "./bounty-types.js";
+import {
   type CreateRuleBody,
   type EngineApi,
   type EngineHealth,
@@ -35,7 +51,7 @@ export interface EngineClientOptions {
   fetchImpl?: typeof fetch;
 }
 
-export class EngineClient implements EngineApi {
+export class EngineClient implements EngineApi, BountyEngineApi {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly timeoutMs: number;
@@ -163,6 +179,57 @@ export class EngineClient implements EngineApi {
 
   async ackNotification(id: string): Promise<void> {
     await this.request("POST", `/v1/notifications/${encodeURIComponent(id)}/ack`, {});
+  }
+
+  // ---- AI bounty endpoints (see bounty-types.ts)
+
+  async linkGithub(body: LinkGithubBody): Promise<GithubLink> {
+    const json = await this.request("POST", "/v1/github/links", body);
+    return this.parse(z.object({ link: GithubLinkSchema }), json, "github link").link;
+  }
+
+  async unlinkGithub(telegramUserId: string): Promise<void> {
+    await this.request("POST", "/v1/github/links/unlink", { telegramUserId });
+  }
+
+  async connectRepository(body: ConnectRepositoryBody): Promise<ConnectedRepository> {
+    const json = await this.request("POST", "/v1/repositories/connect", body);
+    return this.parse(z.object({ repository: ConnectedRepositorySchema }), json, "repository").repository;
+  }
+
+  async listRepositories(ownerChatId: string): Promise<ConnectedRepository[]> {
+    const json = await this.request("GET", `/v1/repositories?${new URLSearchParams({ ownerChatId })}`);
+    return this.parse(z.object({ repositories: z.array(ConnectedRepositorySchema) }), json, "repositories").repositories;
+  }
+
+  async disconnectRepository(repositoryId: string, reason: string): Promise<void> {
+    await this.request("POST", `/v1/repositories/${encodeURIComponent(repositoryId)}/disconnect`, { reason });
+  }
+
+  async createBountyRule(body: CreateBountyRuleBody): Promise<BountyRule> {
+    const json = await this.request("POST", "/v1/bounty-rules", body);
+    return this.parse(z.object({ bountyRule: BountyRuleSchema }), json, "bounty rule").bountyRule;
+  }
+
+  async bountyRuleAction(id: string, action: "enable" | "pause" | "resume", ownerChatId: string): Promise<BountyRule | null> {
+    const json = await this.request("POST", `/v1/bounty-rules/${encodeURIComponent(id)}/${action}`, { ownerChatId });
+    const r = z.object({ bountyRule: BountyRuleSchema }).safeParse(json);
+    return r.success ? r.data.bountyRule : null;
+  }
+
+  async submitReview(body: SubmitReviewBody): Promise<ContributionReview> {
+    const json = await this.request("POST", "/v1/contributions/review", body);
+    return this.parse(z.object({ review: ContributionReviewSchema }), json, "review").review;
+  }
+
+  async getReview(reviewId: string): Promise<ContributionReview> {
+    const json = await this.request("GET", `/v1/contributions/${encodeURIComponent(reviewId)}`);
+    return this.parse(z.object({ review: ContributionReviewSchema }), json, "review").review;
+  }
+
+  async finalizeReview(reviewId: string, body: FinalizeBody): Promise<ContributionReview> {
+    const json = await this.request("POST", `/v1/contributions/${encodeURIComponent(reviewId)}/finalize`, body);
+    return this.parse(z.object({ review: ContributionReviewSchema }), json, "review").review;
   }
 }
 

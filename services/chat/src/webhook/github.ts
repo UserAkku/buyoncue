@@ -62,6 +62,11 @@ export interface WebhookDeps {
   logger: Logger;
   /** Optional hook to tell the owner what the engine decided about a trigger (IDs only). */
   onTriggerResult?: (trigger: GithubTrigger, result: TriggerResult) => Promise<void> | void;
+  /**
+   * GitHub App pipeline. Runs only after the HMAC check. If it claims the event, the legacy
+   * rule-trigger path below is skipped, so one merged PR can never take two payment paths.
+   */
+  appEvents?: { accept(eventName: string | undefined, deliveryId: string, payload: unknown): Promise<{ handled: false } | { handled: true; status: string; reason?: string }> };
 }
 
 export function createApp(deps: WebhookDeps): Express {
@@ -98,6 +103,21 @@ export function createApp(deps: WebhookDeps): Express {
     } catch {
       res.status(400).json({ error: "invalid JSON" });
       return;
+    }
+
+    if (deps.appEvents) {
+      try {
+        const claimed = await deps.appEvents.accept(eventName, deliveryId, payload);
+        if (claimed.handled) {
+          deps.logger.info("webhook_app_event", { deliveryId, event: eventName, status: claimed.status, reason: claimed.reason });
+          res.status(202).json({ ok: true, status: claimed.status, reason: claimed.reason });
+          return;
+        }
+      } catch {
+        deps.logger.error("webhook_app_event_failed", { deliveryId });
+        res.status(500).json({ error: "internal error" });
+        return;
+      }
     }
 
     const normalized = normalizeEvent(eventName, deliveryId, payload);
