@@ -102,6 +102,17 @@ Message your bot, e.g.:
 
 The bot proposes what it understood, searches the real catalog, asks you to pick the exact product/package and to set each limit, creates a **draft**, and shows an **Enable Rule** button. Nothing can be bought before you tap it. Then merge a PR carrying the label.
 
+## AI bounties with a GitHub App (Telegram ↔ GitHub)
+
+On top of the single-rule flow, the chat service can connect a repository through a **read-only GitHub App** and review real pull requests:
+
+1. **Maintainer** (`TELEGRAM_OWNER_USER_ID`): `/connectgithub` → sign in with GitHub, install the app on one repository, confirm the account link, pick the repository (the bot checks with GitHub that you're an admin) → `/setbounty` (label, tiers, typed USD limits) → **Enable bounty**.
+2. **Contributor** (anyone, private chat): `/linkgithub` → GitHub sign-in → their immutable numeric GitHub ID is bound to their Telegram user through the engine.
+3. **PR opened/updated:** the bot collects evidence from GitHub (files and patches, commits, reviews, check runs, linked issues; limits and gaps reported honestly), sends it to the engine for an AI review and shows the **provisional** score. A new commit supersedes the old review. Nothing is paid.
+4. **PR merged:** the bot re-reads the PR from GitHub, re-collects evidence for the final commit and asks the engine to finalize. The engine alone enforces limits and buys; the gift card is delivered to the contributor's private chat, and "delivered" is only announced after the engine confirms it with an invoice.
+
+Commands: `/connectgithub` `/repositories` `/setbounty` `/review` `/bounties` (maintainer) · `/linkgithub` `/unlinkgithub` `/myrewards` (contributors). Setup: [GitHub App](docs/GITHUB_APP_SETUP.md) · [Telegram + tunnel](docs/TELEGRAM_SETUP.md) · [demo](docs/BOUNTY_DEMO.md) · [engine contract](docs/BOUNTY_ENGINE_CONTRACT.md). The feature is off unless all `GITHUB_APP_*` variables are set; the original Telegram rule flow keeps working either way.
+
 ## Environment variables
 
 All live in `services/chat/.env` (see [`.env.example`](services/chat/.env.example)). No secrets belong in the repo.
@@ -114,7 +125,9 @@ All live in `services/chat/.env` (see [`.env.example`](services/chat/.env.exampl
 | `INTERNAL_API_TOKEN` | yes | Bearer token for all engine `/v1/*` calls |
 | `GITHUB_WEBHOOK_SECRET` | yes | HMAC secret for `X-Hub-Signature-256` |
 | `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | no | Any OpenAI-compatible chat-completions API. All three must be set, otherwise guided mode is used |
-| `PORT` | no (`3002`) | HTTP port for the webhook and `/healthz` |
+| `PORT` | no (`3002`) | HTTP port for the webhook, GitHub OAuth routes and `/healthz` |
+| `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_OAUTH_CALLBACK_URL`, `GITHUB_APP_INSTALL_URL`, `PUBLIC_CHAT_URL` | all or none | GitHub App for AI bounties; see [docs/GITHUB_APP_SETUP.md](docs/GITHUB_APP_SETUP.md) |
+| `CHAT_STATE_FILE` | no | Secret-free local state (review index, webhook dedupe, identity link cache). Default `.data/chat-state.json` |
 
 ## Bot commands
 
@@ -126,7 +139,7 @@ Inline buttons: Enable Rule, Edit/restart, Approve, Reject, Pause, Resume.
 
 ```bash
 cd services/chat
-npm test             # 34 tests, all against a local mock of the engine contract
+npm test             # all tests run against local mocks of the engine and of GitHub
 npm run typecheck
 ```
 

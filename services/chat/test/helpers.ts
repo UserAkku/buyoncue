@@ -28,5 +28,5 @@ export function makeController(client: EngineClient, interpreter: RuleInterprete
 }
 
 export const textOf = (replies: Reply[]) => replies.map((r) => r.text).join("\n---\n");
-export const buttonData = (replies: Reply[]) => replies.flatMap((r) => (r.buttons ?? []).flat().map((b) => b.data));
+export const buttonData = (replies: Reply[]) => replies.flatMap((r) => (r.buttons ?? []).flat().map((b) => b.data).filter((d): d is string => !!d));
 export const cbText = (r: CallbackResult) => textOf(r.replies);

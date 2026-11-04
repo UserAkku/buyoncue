@@ -205,7 +205,118 @@ export class MockEngine {
       if (n) n.acked = true;
       return send(200, { ok: true });
     }
+    if (this.handleBounty(m ?? "GET", path, url, body, send)) return;
     return send(404, { error: "not found" });
+  }
+
+  // ---- AI bounty endpoints (working assumption of the contract; see docs/BOUNTY_ENGINE_CONTRACT.md)
+  readonly links = new Map<string, any>(); // telegramUserId -> link
+  readonly repositories = new Map<string, any>();
+  readonly bountyRules = new Map<string, any>();
+  readonly reviews = new Map<string, any>();
+  /** What the mock "AI" returns. Tests override. */
+  mockScore = {
+    total: 81,
+    max: 100,
+    breakdown: [
+      { category: "Correctness", score: 24, max: 30 },
+      { category: "Tests/CI", score: 20, max: 25 },
+      { category: "Review", score: 17, max: 20 },
+      { category: "Maintainability", score: 12, max: 15 },
+      { category: "Security", score: 8, max: 10 },
+    ],
+  };
+  mockTier: string | null = "Tier 2";
+  mockFinalStatus: string = "pending_approval";
+
+  private handleBounty(m: string, path: string, url: URL, body: any, send: (s: number, j: unknown) => void): boolean {
+    const err = (status: number, code: string, message: string) => send(status, { error: { code, message } });
+    if (m === "POST" && path === "/v1/github/links") {
+      const clash = [...this.links.values()].find((l) => l.githubUserId === body.githubUserId && l.telegramUserId !== body.telegramUserId);
+      if (clash) return err(409, "LINK_CONFLICT", "GitHub account already linked"), true;
+      const link = { githubUserId: body.githubUserId, githubLogin: body.githubLogin, telegramUserId: body.telegramUserId, chatId: body.chatId, linkedAt: new Date().toISOString() };
+      this.links.set(body.telegramUserId, link);
+      return send(201, { link }), true;
+    }
+    if (m === "POST" && path === "/v1/github/links/unlink") {
+      this.links.delete(body.telegramUserId);
+      return send(200, { ok: true }), true;
+    }
+    if (m === "POST" && path === "/v1/repositories/connect") {
+      const repository = { repositoryId: body.repositoryId, installationId: body.installationId, fullName: body.fullName, ownerChatId: body.ownerChatId, status: "connected" };
+      this.repositories.set(body.repositoryId, repository);
+      return send(201, { repository }), true;
+    }
+    if (m === "GET" && path === "/v1/repositories") {
+      const owner = url.searchParams.get("ownerChatId");
+      const repositories = [...this.repositories.values()].filter((r) => r.ownerChatId === owner).map((r) => ({ ...r, bountyRule: [...this.bountyRules.values()].find((b) => b.repositoryId === r.repositoryId) ?? null }));
+      return send(200, { repositories }), true;
+    }
+    const disc = path.match(/^\/v1\/repositories\/([^/]+)\/disconnect$/);
+    if (m === "POST" && disc) {
+      const r = this.repositories.get(decodeURIComponent(disc[1]!));
+      if (r) r.status = "disconnected";
+      return send(200, { ok: true }), true;
+    }
+    if (m === "POST" && path === "/v1/bounty-rules") {
+      if (!this.repositories.has(body.repositoryId)) return err(404, "REPOSITORY_NOT_FOUND", "repository not connected"), true;
+      for (const t of body.tiers) {
+        const p = this.products.find((x) => x.id === t.productId);
+        if (!p || !p.packages.some((k) => k.packageId === t.packageId)) return err(404, "PRODUCT_NOT_FOUND", "unknown product or package"), true;
+      }
+      const bountyRule = { id: randomUUID(), status: "draft", ...body };
+      this.bountyRules.set(bountyRule.id, bountyRule);
+      return send(201, { bountyRule }), true;
+    }
+    const ract = path.match(/^\/v1\/bounty-rules\/([^/]+)\/(enable|pause|resume)$/);
+    if (m === "POST" && ract) {
+      const rule = this.bountyRules.get(ract[1]!);
+      if (!rule || rule.ownerChatId !== body?.ownerChatId) return err(404, "NOT_FOUND", "bounty rule not found"), true;
+      rule.status = ract[2] === "pause" ? "paused" : "active";
+      return send(200, { bountyRule: rule }), true;
+    }
+    if (m === "POST" && path === "/v1/contributions/review") {
+      const prior = [...this.reviews.values()].find((r) => r.idempotencyKey === body.idempotencyKey);
+      if (prior) return send(200, { review: this.reviewView(prior) }), true;
+      if (body.supersedesReviewId) {
+        const old = this.reviews.get(body.supersedesReviewId);
+        if (old) old.status = "superseded";
+      }
+      const review = { reviewId: randomUUID(), idempotencyKey: body.idempotencyKey, status: "completed", repositoryId: body.repositoryId, prNumber: body.prNumber, headSha: body.headSha, purpose: body.purpose, request: body, finalization: null as any };
+      this.reviews.set(review.reviewId, review);
+      return send(202, { review: this.reviewView(review) }), true;
+    }
+    const getRev = path.match(/^\/v1\/contributions\/([^/]+)$/);
+    if (m === "GET" && getRev) {
+      const r = this.reviews.get(getRev[1]!);
+      return r ? send(200, { review: this.reviewView(r) }) : err(404, "NOT_FOUND", "review not found"), true;
+    }
+    const fin = path.match(/^\/v1\/contributions\/([^/]+)\/finalize$/);
+    if (m === "POST" && fin) {
+      const r = this.reviews.get(fin[1]!);
+      if (!r) return err(404, "NOT_FOUND", "review not found"), true;
+      if (body.expectedHeadSha !== r.headSha) return err(409, "HEAD_SHA_MISMATCH", "review is for a different commit"), true;
+      r.finalizeRequest = body;
+      r.finalization = { status: this.mockFinalStatus, tier: this.mockTier, purchaseId: null, invoiceId: this.mockFinalStatus === "delivered" ? "MOCK-INV-BOUNTY" : null };
+      return send(200, { review: this.reviewView(r) }), true;
+    }
+    return false;
+  }
+
+  private reviewView(r: any) {
+    const superseded = r.status === "superseded";
+    return {
+      reviewId: r.reviewId,
+      status: r.status,
+      repositoryId: r.repositoryId,
+      prNumber: r.prNumber,
+      headSha: r.headSha,
+      provisional: r.finalization ? false : true,
+      score: superseded ? null : this.mockScore,
+      candidateTier: superseded ? null : this.mockTier,
+      summary: "Mock summary",
+      finalization: r.finalization,
+    };
   }
 
   private onTrigger(t: any): { accepted: boolean; eventId: string; reason: string } {
