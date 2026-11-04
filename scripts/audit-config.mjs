@@ -161,7 +161,15 @@ check('chat', chat, 'GITHUB_OAUTH_CALLBACK_URL', { ...ghReq, validate: (v) => (p
 check('chat', chat, 'GITHUB_APP_INSTALL_URL', { ...ghReq, validate: (v) => (/^https:\/\/github\.com\/apps\/[a-z0-9-]+\/installations\/new\/?$/.test(v) ? null : 'must be https://github.com/apps/<app-slug>/installations/new') });
 check('chat', chat, 'GITHUB_API_URL', { defaultNote: 'https://api.github.com (test/GHES hook only)', validate: httpUrl });
 check('chat', chat, 'GITHUB_WEB_URL', { defaultNote: 'https://github.com (test/GHES hook only)', validate: httpUrl });
-if (!ghAny) probe('chat', 'GitHub App feature', 'BLOCKED', 'no GitHub App variable is set, so the bounty commands answer "not configured"');
+if (!ghAny) {
+  const stagingFile = resolve(root, 'services/chat/.env.github-app.pending');
+  const staged = existsSync(stagingFile) ? dotenv.parse(readFileSync(stagingFile, 'utf8')) : {};
+  const group = ['GITHUB_APP_ID', 'GITHUB_APP_CLIENT_ID', 'GITHUB_APP_CLIENT_SECRET', 'GITHUB_APP_PRIVATE_KEY_PATH', 'GITHUB_OAUTH_CALLBACK_URL', 'GITHUB_APP_INSTALL_URL', 'PUBLIC_CHAT_URL'];
+  const have = group.filter((k) => isSet(staged[k]));
+  probe('chat', 'GitHub App feature', 'BLOCKED', have.length
+    ? `group staged in services/chat/.env.github-app.pending (${have.length}/${group.length}); still missing: ${group.filter((k) => !have.includes(k)).join(', ')}. Then: npm run env:github-activate`
+    : 'no GitHub App variable is set, so the bounty commands answer "not configured"');
+}
 
 // LLM (chat parser) — Bedrock takes precedence; LLM_PROVIDER=bedrock with missing parts aborts startup
 function llmChecks(svc, env, modelVar, priority) {
