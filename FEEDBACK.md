@@ -24,3 +24,11 @@ A running log of real problems, ambiguities and suggestions found while building
 - [ ] Real Telegram: inline-button flow, `getChat` returning `private` for the recipient, message formatting.
 - [ ] Real GitHub: signed delivery and *Redeliver* produce the duplicate path.
 - [ ] End-to-end with a real Bitrefill invoice (engine owner).
+
+## Integration audit (2026-11-04)
+
+F-01/F-02/F-04/F-05/F-06/F-07 are now exercised against the actual engine HTTP interface in `tests/integration/baseline.test.ts`. The engine uses `draft`, `enabled`, `paused`, lowercase canonical repository identities, zero as the always-ask threshold, structured error bodies and an at-least-once outbox. F-10 is resolved by scope: the chat webhook owns the immediate eligible-trigger notice; the engine owns durable purchase outcomes.
+
+Confirmed and fixed: transient Telegram `getChat` lookup failure discarded redemption by ACKing a redacted warning; exception messages could leak redemption into logs; numeric-only recipient validation could enable unlinked chats; the owner lacked a final receipt when the recipient differed; simulation bypassed quote/order rechecks and could not exercise private redemption relay. Regression and full HTTP E2E coverage are included. F-03 (draft cleanup), F-08 (explicit negative ACK) and F-09 (estimated price UX) remain outside baseline scope. ACK retry suppresses duplicate messages within one worker; a process crash after Telegram acceptance but before ACK can still repeat that private notification. No paid request is retried.
+
+Safe external checks passed for Telegram identity/polling and temporary HTTPS routing. Actual Bitrefill reads are blocked by absent credentials. Genuine GitHub event delivery and a paid purchase remain manual/unverified. See `docs/BASELINE_VERIFICATION.md`.

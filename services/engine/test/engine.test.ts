@@ -41,7 +41,7 @@ beforeAll(async()=>{
 afterAll(async()=>{if(db)await db.end();await base.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);await base.end();});
 beforeEach(async()=>{
   await db.query('TRUNCATE notification_outbox,invoices,approvals,spending_ledger,purchases,trigger_events,commerce_rules CASCADE');
-  provider=new FakePurchasing();engine=new Engine(db,new FakeCatalogue(),provider,true,box);
+  provider=new FakePurchasing();engine=new Engine(db,new FakeCatalogue(),provider,false,box);
 });
 
 describe('Rules and trusted event eligibility',()=>{
@@ -53,12 +53,12 @@ describe('Rules and trusted event eligibility',()=>{
   it('rejects missing label',async()=>{await enabled();await buy({labels:[]});expect(provider.creates).toBe(0);});
   it('rejects unmerged PR',async()=>{await enabled();expect((await engine.trigger(event({merged:false}))).reason).toBe('not_merged');await engine.tick();expect(provider.creates).toBe(0);});
   it('processes a valid PR once with real charge separate from INR face value',async()=>{
-    await enabled();const p=await buy();expect(p.status).toBe('DELIVERED');expect(p.amountUsdCents).toBe(100);expect(provider.pays).toBe(1);
-    expect(p.invoiceId).toBeTruthy();expect((await notes()).filter(n=>n.type==='purchase_delivered')).toHaveLength(1);
+    await enabled();const p=await buy();expect(p.status).toBe('TEST_DELIVERED');expect(p.amountUsdCents).toBe(100);expect(provider.pays).toBe(1);
+    expect(p.invoiceId).toBeTruthy();expect((await notes()).filter(n=>n.type==='test_purchase_delivered')).toHaveLength(1);
   });
   it('deduplicates concurrent deliveries for the same PR across workers',async()=>{
     await enabled();await Promise.all([engine.trigger(event()),engine.trigger(event())]);
-    const other=new Engine(db,new FakeCatalogue(),provider,true,box);
+    const other=new Engine(db,new FakeCatalogue(),provider,false,box);
     await Promise.all([engine.tick(),other.tick()]);await engine.tick();
     expect(provider.creates).toBe(1);expect(provider.pays).toBe(1);expect(await engine.listPurchases('123')).toHaveLength(1);
     expect((await notes()).some(n=>n.type==='duplicate_event_skipped')).toBe(true);
@@ -107,7 +107,7 @@ describe('Atomic budgets and approvals',()=>{
     await enabled({autoApproveUpToUsdCents:50});const p=await buy();expect(p.status).toBe('PENDING_APPROVAL');expect(provider.pays).toBe(0);
     await expect(engine.approval(String(p.id),'999','approve')).rejects.toMatchObject({code:'PURCHASE_NOT_FOUND'});
     await engine.approval(String(p.id),'123','approve');await engine.tick();expect(provider.pays).toBe(1);
-    expect((await engine.listPurchases('123'))[0]!.status).toBe('DELIVERED');
+    expect((await engine.listPurchases('123'))[0]!.status).toBe('TEST_DELIVERED');
     await expect(engine.approval(String(p.id),'123','approve')).rejects.toMatchObject({code:'APPROVAL_NOT_PENDING'});
   });
   it('does not let approval override hard caps',async()=>{
@@ -147,49 +147,50 @@ describe('Provider uncertainty, delivery and secrets',()=>{
   });
   it('keeps timeout uncertain across restarts without repeat payment or invoice',async()=>{
     provider.timeout=true;await enabled();const p=await buy();expect(p.status).toBe('PAYMENT_UNCERTAIN');
-    engine=new Engine(db,new FakeCatalogue(),provider,true,box);await due();await engine.tick();await due();await engine.tick();
+    engine=new Engine(db,new FakeCatalogue(),provider,false,box);await due();await engine.tick();await due();await engine.tick();
     expect(provider.pays).toBe(1);expect(provider.creates).toBe(1);
     expect((await db.query('SELECT state FROM spending_ledger')).rows[0].state).toBe('reserved');
   });
   it('recovers delivery after a lost payment response using the existing invoice',async()=>{
     provider.timeout=true;await enabled();const p=await buy();provider.paid.add(String(p.invoiceId));await due();await engine.tick();
-    expect((await engine.listPurchases('123'))[0]!.status).toBe('DELIVERED');expect(provider.pays).toBe(1);expect(provider.creates).toBe(1);
+    expect((await engine.listPurchases('123'))[0]!.status).toBe('TEST_DELIVERED');expect(provider.pays).toBe(1);expect(provider.creates).toBe(1);
   });
   it('quarantines lost creation response without creating a second invoice',async()=>{
     provider.failCreate=true;await enabled();await buy();await due();await engine.tick();await due();await engine.tick();
     expect(provider.creates).toBe(1);expect(provider.pays).toBe(0);expect((await engine.listPurchases('123'))[0]!.status).toBe('INVOICE_UNCERTAIN');
   });
   it('a final invoice with failed order is not delivered and does not free paid budget',async()=>{
-    provider.failedOrder=true;await enabled();const p=await buy();expect(p.status).toBe('FAILED');expect((await notes()).some(n=>n.type==='purchase_delivered')).toBe(false);
+    provider.failedOrder=true;await enabled();const p=await buy();expect(p.status).toBe('FAILED');expect((await notes()).some(n=>n.type==='test_purchase_delivered')).toBe(false);
     expect((await db.query('SELECT state FROM spending_ledger')).rows[0].state).toBe('committed');
   });
   it('awaits redemption instead of claiming an incomplete delivery',async()=>{
-    provider.missingRedemption=true;await enabled();await buy();expect((await notes()).some(n=>n.type==='purchase_delivered')).toBe(false);
-    provider.missingRedemption=false;await due();await engine.tick();expect((await engine.listPurchases('123'))[0]!.status).toBe('DELIVERED');
+    provider.missingRedemption=true;await enabled();await buy();expect((await notes()).some(n=>n.type==='test_purchase_delivered')).toBe(false);
+    provider.missingRedemption=false;await due();await engine.tick();expect((await engine.listPurchases('123'))[0]!.status).toBe('TEST_DELIVERED');
   });
   it('duplicate webhook does not duplicate delivery; forged status is not proof',async()=>{
-    provider.timeout=true;await enabled();const p=await buy();await engine.webhook(String(p.invoiceId));await engine.tick();expect((await notes()).some(n=>n.type==='purchase_delivered')).toBe(false);
+    provider.timeout=true;await enabled();const p=await buy();await engine.webhook(String(p.invoiceId));await engine.tick();expect((await notes()).some(n=>n.type==='test_purchase_delivered')).toBe(false);
     provider.paid.add(String(p.invoiceId));await Promise.all([engine.webhook(String(p.invoiceId)),engine.webhook(String(p.invoiceId))]);await engine.tick();
-    await engine.webhook(String(p.invoiceId));await engine.tick();expect((await notes()).filter(n=>n.type==='purchase_delivered')).toHaveLength(1);
+    await engine.webhook(String(p.invoiceId));await engine.tick();expect((await notes()).filter(n=>n.type==='test_purchase_delivered')).toHaveLength(1);
   });
   it('encrypts redemption at rest, redacts purchase list, clears secrets on idempotent ack',async()=>{
     await enabled();await buy();const rows=await db.query('SELECT * FROM notification_outbox');
     expect(JSON.stringify(rows.rows)).not.toContain('TEST-SECRET-CODE');expect(JSON.stringify(await engine.listPurchases('123'))).not.toContain('TEST-SECRET-CODE');
-    const n=(await notes()).find(n=>n.type==='purchase_delivered')!;expect(n.chatId).toBe('456');expect(n.redemption).toMatchObject({code:'TEST-SECRET-CODE'});
+    const n=(await notes()).find(n=>n.type==='test_purchase_delivered')!;expect(n.chatId).toBe('456');expect(n.redemption).toMatchObject({code:'TEST-SECRET-CODE'});
     await engine.ack(n.id);await engine.ack(n.id);expect((await notes()).some(x=>x.id===n.id)).toBe(false);
     expect((await db.query('SELECT redemption_ciphertext FROM notification_outbox WHERE id=$1',[n.id])).rows[0].redemption_ciphertext).toBeNull();
   });
   it('disabled mode cannot construct a live purchasing engine',()=>{
-    expect(()=>new Engine(db,new FakeCatalogue(),provider,false,box)).toThrow('forbidden');
+    expect(()=>new Engine(db,new FakeCatalogue(),Object.assign(Object.create(provider),{mode:'live'}),false,box)).toThrow('forbidden');
   });
   it('disabled mode simulates durably with no live payment or genuine redemption',async()=>{
-    engine=new Engine(db,new FakeCatalogue(),new TestPurchasing(),false,box);await enabled();const p=await buy();
+    engine=new Engine(db,new FakeCatalogue(),new TestPurchasing(new FakeCatalogue(),db),false,box);await enabled();const p=await buy();
     expect(p.status).toBe('TEST_DELIVERED');expect(String(p.invoiceId)).toMatch(/^test:/);expect(provider.creates).toBe(0);expect(provider.pays).toBe(0);
-    expect((await notes()).find(n=>n.type==='test_purchase_delivered')!.redemption).toBeNull();
+    expect((await notes()).find(n=>n.type==='test_purchase_delivered')!.redemption).toMatchObject({code:'TEST-NOT-REDEEMABLE'});
   });
   it('disabling new spending still reconciles an existing paid invoice with read-only calls',async()=>{
     provider.timeout=true;await enabled();const p=await buy();provider.paid.add(String(p.invoiceId));
-    engine=new Engine(db,new FakeCatalogue(),new TestPurchasing(),false,box,900,provider);
+    await db.query("UPDATE purchases SET mode='live'");
+    engine=new Engine(db,new FakeCatalogue(),new TestPurchasing(new FakeCatalogue(),db),false,box,900,provider);
     await due();await engine.tick();expect((await engine.listPurchases('123'))[0]!.status).toBe('DELIVERED');
     expect(provider.pays).toBe(1);expect(provider.creates).toBe(1);
   });
@@ -203,7 +204,7 @@ describe('HTTP contract',()=>{
   it('implements health, auth, products, rules, triggers, purchases, notifications and ack',async()=>{
     const app=buildApp(engine,token);const headers={authorization:`Bearer ${token}`};
     try {
-      expect((await app.inject({url:'/health'})).json()).toEqual({ok:true,service:'engine',livePurchasesEnabled:true});
+      expect((await app.inject({url:'/health'})).json()).toEqual({ok:true,service:'engine',livePurchasesEnabled:false});
       expect((await app.inject({url:'/v1/rules?ownerChatId=123'})).statusCode).toBe(401);
       const search=await app.inject({url:'/v1/products/search?query=gift&country=IN',headers});expect(search.json().products[0]).toEqual(fixtureProduct);
       expect((await app.inject({url:`/v1/products/${fixtureProduct.id}`,headers})).json().product).toEqual(fixtureProduct);
@@ -211,7 +212,7 @@ describe('HTTP contract',()=>{
       for (const action of ['enable','pause','resume']) expect((await app.inject({method:'POST',url:`/v1/rules/${id}/${action}`,headers,payload:{ownerChatId:'123'}})).statusCode).toBe(200);
       expect((await app.inject({url:'/v1/rules?ownerChatId=123',headers})).json().rules).toHaveLength(1);
       const t=await app.inject({method:'POST',url:'/v1/triggers/github',headers,payload:event()});expect(t.statusCode).toBe(202);expect(t.json().reason).toBe('queued');await engine.tick();
-      expect((await app.inject({url:'/v1/purchases?ownerChatId=123',headers})).json().purchases[0].status).toBe('DELIVERED');
+      expect((await app.inject({url:'/v1/purchases?ownerChatId=123',headers})).json().purchases[0].status).toBe('TEST_DELIVERED');
       const ns=(await app.inject({url:'/v1/notifications?limit=20',headers})).json().items;expect(ns.length).toBeGreaterThan(0);
       const ack=await app.inject({method:'POST',url:`/v1/notifications/${ns[0].id}/ack`,headers});expect(ack.json()).toEqual({ok:true});
       const hook=await app.inject({method:'POST',url:'/webhooks/bitrefill',payload:{id:randomUUID(),status:'complete',orders:[],redemption_info:'FORGED'}});expect(hook.json()).toEqual({ok:true});

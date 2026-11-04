@@ -47,6 +47,8 @@ export interface ControllerDeps {
   ownerUserId: string | null;
   logger: Logger;
   sessions?: SessionStore;
+  /** Authenticated Telegram getChat lookup; unknown recipients must start the bot first. */
+  verifyRecipient?: (chatId: string) => Promise<boolean>;
 }
 
 export class Controller {
@@ -56,6 +58,7 @@ export class Controller {
   private readonly logger: Logger;
   private readonly sessions: SessionStore;
   private readonly productCache = new Map<string, Product>();
+  private readonly verifyRecipient?: (chatId: string) => Promise<boolean>;
 
   constructor(deps: ControllerDeps) {
     this.engine = deps.engine;
@@ -63,6 +66,7 @@ export class Controller {
     this.ownerUserId = deps.ownerUserId;
     this.logger = deps.logger;
     this.sessions = deps.sessions ?? new SessionStore();
+    this.verifyRecipient = deps.verifyRecipient;
   }
 
   // ---------------------------------------------------------------- auth
@@ -269,7 +273,7 @@ export class Controller {
     try {
       proposal = await this.interpreter.interpret(text);
     } catch (err) {
-      this.logger.warn("llm_interpret_failed", { reason: (err as Error).message });
+      this.logger.warn("llm_interpret_failed");
       s.mode = "collect";
       return [
         { text: "⚠️ I couldn't interpret that automatically, so let's do it step by step." },
@@ -572,6 +576,7 @@ export class Controller {
    */
   async createDraftRule(ownerChatId: string, draft: RuleDraft): Promise<Rule> {
     const body = toCreateRuleBody(draft, ownerChatId);
+    await this.checkRecipient(body.recipientChatId, ownerChatId);
     let product: Product;
     try {
       product = await this.engine.getProduct(body.productId);
@@ -588,6 +593,15 @@ export class Controller {
     }
     this.productCache.set(product.id, product);
     return this.engine.createRule(body);
+  }
+
+  private async checkRecipient(recipient: string, owner: string): Promise<void> {
+    if (!normalizeRecipient(recipient) || (recipient !== owner && !this.verifyRecipient)) {
+      throw new UserFacingError("Recipient is not linked to a verified private chat. Ask them to start this bot first.");
+    }
+    if (this.verifyRecipient && !await this.verifyRecipient(recipient)) {
+      throw new UserFacingError("Recipient could not be verified as a private chat. Ask them to start this bot, then retry.");
+    }
   }
 
   private async finalize(a: Actor, s: Session): Promise<Reply[]> {
@@ -671,6 +685,10 @@ export class Controller {
   }
 
   private async ruleAction(a: Actor, ruleId: string, action: "enable" | "pause" | "resume"): Promise<CallbackResult> {
+    if (action !== "pause") {
+      const pending = (await this.engine.listRules(a.userId)).find(r => r.id === ruleId);
+      if (pending?.recipientChatId) await this.checkRecipient(pending.recipientChatId, a.userId);
+    }
     const fn = { enable: this.engine.enableRule, pause: this.engine.pauseRule, resume: this.engine.resumeRule }[action];
     const rule = await fn.call(this.engine, ruleId, a.userId);
     const status = rule?.status ? ` (status: ${esc(rule.status)})` : "";
@@ -703,7 +721,7 @@ export class Controller {
     const live = health ? (health.livePurchasesEnabled ? "🟢 live purchases ON" : "🟡 live purchases OFF (dry run)") : "🔴 health check failed";
     const active = rules.filter((r) => !["draft", "paused"].includes(r.status.toLowerCase())).length;
     const recent = purchases
-      .slice(0, 5)
+      .slice(-5).reverse()
       .map((p) => {
         const amt = p.amountUsdCents != null ? formatUsd(p.amountUsdCents) : "—";
         const inv = p.invoiceId ? ` · invoice ${code(p.invoiceId)}` : "";
@@ -737,16 +755,16 @@ export class Controller {
       this.logger.warn("engine_error", { kind: err.kind, status: err.status });
       switch (err.kind) {
         case "offline":
-          return { text: "⚠️ I can't reach the PactPilot engine right now. Nothing was changed. Please try again in a minute." };
+          return { text: "⚠️ I can't reach the PactPilot engine right now. The request outcome may be unknown. Check /rules or /status before retrying an action." };
         case "unauthorized":
           return { text: "🔒 The engine rejected my internal API token. Check INTERNAL_API_TOKEN on both services. Nothing was changed." };
         case "invalid_response":
-          return { text: "⚠️ The engine sent an unexpected response. Nothing was changed." };
+          return { text: "⚠️ The engine sent an unexpected response. Check /rules or /status to confirm the action's outcome." };
         default:
           return { text: `⚠️ The engine said: ${esc(err.message)} (HTTP ${err.status}). Nothing was changed.` };
       }
     }
-    this.logger.error("unexpected_error", { reason: (err as Error)?.message });
+    this.logger.error("unexpected_error");
     return { text: "⚠️ Something went wrong on my side. Nothing was changed." };
   }
 }

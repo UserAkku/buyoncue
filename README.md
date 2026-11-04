@@ -16,7 +16,7 @@
 | | |
 |---|---|
 | **Built by us (this repo, `services/chat`)** | Telegram bot (grammY), LLM rule interpreter with Zod validation + guided fallback, signed GitHub webhook receiver, notification relay with privacy checks, typed engine client, mock engine, tests. |
-| **Built by us (`services/engine`, separate branch/developer)** | Policy and budget enforcement, rule/purchase state, approvals, idempotent trigger handling, and the integration with Bitrefill. |
+| **Built by us (`services/engine`)** | Policy and budget enforcement, rule/purchase state, approvals, idempotent trigger handling, and the integration with Bitrefill. |
 | **Bitrefill technology reused** | Catalog (product + denomination search, stock), invoice creation and payment, and gift-card delivery/redemption data, all consumed **through the engine**. The chat service never calls Bitrefill and never holds Bitrefill or wallet credentials. |
 
 > Exact Bitrefill endpoints used by the engine: *see `services/engine/README.md` (owned by the engine developer).*
@@ -141,14 +141,33 @@ Tests cover: a full rule conversation, missing-field clarification, invented pro
 - The engine's rule-status and notification-type vocabularies are only partly specified; the bot falls back to the engine's own text. See [FEEDBACK.md](FEEDBACK.md).
 - Only GitHub `pull_request` (closed + merged) events are supported.
 - Recipients other than the owner must have started the bot once, or Telegram refuses delivery.
-- As of this writing the chat service has been exercised only against the contract mock, not yet against the real engine, a live Telegram bot, or a live GitHub webhook.
+- The integrated baseline is tested through both real HTTP services with fake payment and Telegram boundaries. A funded Bitrefill purchase and genuine GitHub-triggered live delivery remain unverified. See [the verification report](docs/BASELINE_VERIFICATION.md).
 
 ## Repository layout
 
 ```
 services/chat/      Telegram + webhook + notifications (this service)
-services/engine/    Engine (separate developer, separate branch)
+services/engine/    Commerce engine and PostgreSQL worker
 docs/DEMO.md        2–3 minute live demo script
 docs/SUBMISSION.md  Hackathon submission text
 FEEDBACK.md         Honest log of problems, workarounds and suggestions
 ```
+
+## Integrated baseline verification
+
+Use Node.js 22.12+ for the current test toolchain and a disposable PostgreSQL database.
+
+```sh
+npm --prefix services/engine ci
+npm --prefix services/chat ci
+export TEST_DATABASE_URL=postgresql://localhost/pactpilot_engine_test
+LIVE_PURCHASES_ENABLED=false npm test
+npm run typecheck
+npm run build
+# With ignored local .env files configured, read-only external checks:
+LIVE_PURCHASES_ENABLED=false npm run check:live
+```
+
+The root suite connects the real chat client, GitHub HTTP endpoint and engine HTTP server to an isolated migrated PostgreSQL schema. It forbids external fetches and uses marked fake invoice IDs and synthetic non-redeemable data. The production live flag is never enabled by the tests. Optional LLM interpretation is tested with a proposal stub; actual LLM credentials are not required for guided setup.
+
+The live MVP accepts one pre-linked recipient: set `AUTHORIZED_RECIPIENT_CHAT_ID` in the engine after that person starts the bot privately. The chat service checks the recipient with Telegram before draft creation and before enable/resume. Use the same internal API token in both service environments. The existing local environments were preserved/provisioned without committing credentials.

@@ -140,7 +140,7 @@ export class NotificationWorker {
       await this.sender.sendMessage(target, message.html, message.buttons);
     } catch (err) {
       // Not acked: the engine will redeliver it on the next poll.
-      this.logger.warn("telegram_send_failed", { id: n.id, type: n.type, reason: (err as Error).message?.slice(0, 120) });
+      this.logger.warn("telegram_send_failed", { id: n.id, type: n.type });
       return "retry";
     }
     this.sentUnacked.add(n.id);
@@ -170,7 +170,11 @@ export class NotificationWorker {
         if (!fresh.has(chatId)) return false;
       }
     }
-    return (await this.sender.chatType(chatId)) === "private";
+    const type = await this.sender.chatType(chatId);
+    // null means the lookup failed, not that Telegram proved this is an unsafe chat.
+    // Retain the encrypted delivery and retry instead of acknowledging lost redemption.
+    if (type === null) throw new Error("Telegram chat lookup unavailable");
+    return type === "private";
   }
 
   private async recipientChats(force = false): Promise<Set<string>> {
@@ -197,10 +201,11 @@ function icon(type: string): string {
 export function renderNotification(n: Notification): { html: string; buttons?: Button[][] } {
   const lines: string[] = [];
   let buttons: Button[][] | undefined;
-  const isDelivered = n.type === "purchase_delivered";
+  const simulated = n.type === "test_purchase_delivered";
+  const isDelivered = n.type === "purchase_delivered" || simulated;
 
   if (isDelivered) {
-    lines.push(`🎁 ${bold("Purchase delivered.")}`);
+    lines.push(`🎁 ${bold(simulated ? "TEST MODE: simulated delivery. No real purchase." : "Purchase delivered.")}`);
     if (n.invoiceId) lines.push(`Invoice: ${code(n.invoiceId)}`);
     if (n.text) lines.push(esc(n.text));
     const r = n.redemption;

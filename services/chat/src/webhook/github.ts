@@ -7,7 +7,7 @@ import type { Logger } from "../logger.js";
 
 /** Verifies GitHub's `X-Hub-Signature-256` over the raw request bytes. */
 export function verifySignature(secret: string, rawBody: Buffer, header: string | undefined): boolean {
-  if (!header || !header.startsWith("sha256=")) return false;
+  if (!header || !/^sha256=[a-fA-F0-9]{64}$/.test(header)) return false;
   const expected = createHmac("sha256", secret).update(rawBody).digest();
   const given = Buffer.from(header.slice("sha256=".length), "hex");
   // timingSafeEqual throws on length mismatch, so check first (length isn't secret).
@@ -118,7 +118,7 @@ export function createApp(deps: WebhookDeps): Express {
       try {
         await deps.onTriggerResult?.(normalized.trigger, result);
       } catch (err) {
-        deps.logger.warn("trigger_notify_failed", { deliveryId, reason: (err as Error).message });
+        deps.logger.warn("trigger_notify_failed", { deliveryId });
       }
       res.status(202).json({ ok: true, accepted: result.accepted, eventId: result.eventId, reason: result.reason });
     } catch (err) {

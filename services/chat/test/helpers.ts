@@ -24,7 +24,7 @@ export function stubInterpreter(proposal: Partial<RuleProposal>): RuleInterprete
 }
 
 export function makeController(client: EngineClient, interpreter: RuleInterpreter | null = null) {
-  return new Controller({ engine: client, interpreter, ownerUserId: OWNER_ID, logger: silentLogger });
+  return new Controller({ engine: client, interpreter, ownerUserId: OWNER_ID, logger: silentLogger, verifyRecipient:async()=>true });
 }
 
 export const textOf = (replies: Reply[]) => replies.map((r) => r.text).join("\n---\n");

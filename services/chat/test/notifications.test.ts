@@ -180,6 +180,27 @@ describe("notification worker", () => {
     expect(all).not.toContain("1234");
   });
 
+  it("retains redemption when Telegram chat lookup is temporarily unavailable", async () => {
+    const n = delivered("3003");
+    chatTypes["3003"] = null;
+    const w = makeWorker();
+    await w.tick();
+    expect(n.acked).toBe(false);
+    expect(sent).toHaveLength(0);
+    chatTypes["3003"] = "private";
+    clock += 60_000;
+    await w.tick();
+    expect(sent[0]!.chatId).toBe("3003");
+    expect(n.acked).toBe(true);
+  });
+
+  it("does not log Telegram exception messages containing redemption", async () => {
+    delivered(OWNER_ID);
+    const failing: Sender = { ...sender, async sendMessage() { throw new Error(SECRET_CODE); } };
+    await new NotificationWorker({engine:client,sender:failing,ownerChatId:OWNER_ID,logger}).tick();
+    expect(logLines.join("\n")).not.toContain(SECRET_CODE);
+  });
+
   it("escapes engine-supplied text so it can't inject markup", async () => {
     engine.pushNotification({ chatId: OWNER_ID, type: "purchase_blocked", text: "Blocked <b>x</b> & <a href='http://evil'>y</a>" });
     await makeWorker().tick();

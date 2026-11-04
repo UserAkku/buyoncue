@@ -4,6 +4,7 @@ const schema = z.object({
   DATABASE_URL: z.string().url(),
   INTERNAL_API_TOKEN: z.string().min(32),
   BITREFILL_API_KEY: z.string().default(''),
+  AUTHORIZED_RECIPIENT_CHAT_ID: z.string().regex(/^[1-9]\d{0,14}$/).optional(),
   BITREFILL_BASE_URL: z.literal('https://api.bitrefill.com/v2').default('https://api.bitrefill.com/v2'),
   PUBLIC_ENGINE_URL: z.string().url(),
   LIVE_PURCHASES_ENABLED: z.enum(['true', 'false']).default('false'),
@@ -20,5 +21,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (c.LIVE_PURCHASES_ENABLED === 'true' && (!c.BITREFILL_API_KEY || !c.PUBLIC_ENGINE_URL.startsWith('https://'))) {
     throw new Error('Live mode requires BITREFILL_API_KEY and an HTTPS PUBLIC_ENGINE_URL');
   }
+  if (c.LIVE_PURCHASES_ENABLED==='true' && !c.AUTHORIZED_RECIPIENT_CHAT_ID) throw new Error('Live mode requires AUTHORIZED_RECIPIENT_CHAT_ID for the pre-linked private recipient');
   return c;
 }

@@ -11,7 +11,7 @@ async function main() {
   await db.query('SELECT 1');
   const provider=new Bitrefill(config.BITREFILL_API_KEY,config.BITREFILL_BASE_URL,config.PUBLIC_ENGINE_URL);
   const live=config.LIVE_PURCHASES_ENABLED==='true';
-  const engine=new Engine(db,provider,live?provider:new TestPurchasing(),live,new SecretBox(config.REDEMPTION_ENCRYPTION_KEY),config.APPROVAL_TTL_SECONDS,provider);
+  const engine=new Engine(db,provider,live?provider:new TestPurchasing(provider,db),live,new SecretBox(config.REDEMPTION_ENCRYPTION_KEY),config.APPROVAL_TTL_SECONDS,provider,config.AUTHORIZED_RECIPIENT_CHAT_ID);
   const app=buildApp(engine,config.INTERNAL_API_TOKEN);
   let running:Promise<void>|undefined;
   let stopping=false;

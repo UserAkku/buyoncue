@@ -25,7 +25,8 @@ const terminalInvoice = new Set(['denied', 'payment_error', 'blocked']);
 export class Engine {
   constructor(readonly db: Db, readonly catalogue: Catalogue, readonly purchasing: Purchasing,
     readonly liveEnabled: boolean, private secrets: SecretBox, private approvalTtl = 900,
-    private readOnlyReconciler?: Pick<Purchasing,'invoice'|'order'>) {
+    private readOnlyReconciler?: Pick<Purchasing,'invoice'|'order'>,
+    private authorizedRecipientChatId?: string) {
     if (purchasing.mode === 'live' && !liveEnabled) throw new Error('Live purchasing adapter forbidden while disabled');
   }
   private async notify(c: Sql, n: Note) {
@@ -46,6 +47,7 @@ export class Engine {
   }
   async createRule(input: RuleInput) {
     const r = ruleSchema.parse(input);
+    if (this.authorizedRecipientChatId && r.recipientChatId!==this.authorizedRecipientChatId) throw new AppError('RECIPIENT_NOT_AUTHORIZED','Recipient is not the configured pre-linked private chat');
     await this.validatePackage(r.productId, r.packageId);
     const result = await this.db.query(`INSERT INTO commerce_rules
       (id,owner_chat_id,recipient_chat_id,name,repository,required_label,product_id,package_id,
@@ -74,6 +76,7 @@ export class Engine {
     if (action !== 'pause') await this.validatePackage(initial.product_id, initial.package_id);
     return transaction(this.db, async c => {
       const r = await this.ownedRule(c,id,ownerChatId);
+      if (action!=='pause' && this.authorizedRecipientChatId && r.recipient_chat_id!==this.authorizedRecipientChatId) throw new AppError('RECIPIENT_NOT_AUTHORIZED','Recipient is not the configured pre-linked private chat');
       const target = action === 'pause' ? 'paused' : 'enabled';
       if (r.status === target) return publicRow(r as unknown as Record<string, unknown>);
       if ((action === 'enable' && r.status !== 'draft') || (action === 'resume' && r.status !== 'paused') || (action === 'pause' && r.status !== 'enabled')) {
@@ -191,7 +194,8 @@ export class Engine {
       if (n.redemption_ciphertext) {
         // Defense in depth: delivery authorization is rechecked at read time.
         const auth = await this.db.query(`SELECT 1 FROM purchases p JOIN commerce_rules r ON r.id=p.rule_id
-          WHERE p.id=$1 AND p.status='DELIVERED' AND p.mode='live' AND r.recipient_chat_id=$2 AND p.invoice_id=$3`,[n.purchase_id,n.chat_id,n.invoice_id]);
+          WHERE p.id=$1 AND ((p.status='DELIVERED' AND p.mode='live') OR (p.status='TEST_DELIVERED' AND p.mode='test' AND $4='test_purchase_delivered'))
+          AND r.recipient_chat_id=$2 AND p.invoice_id=$3`,[n.purchase_id,n.chat_id,n.invoice_id,n.type]);
         if (auth.rowCount) redemption=this.secrets.open(n.redemption_ciphertext,`${n.id}:${n.chat_id}:${n.purchase_id}`);
       }
       items.push({id:n.id,chatId:n.chat_id,type:n.type,text:n.text,purchaseId:n.purchase_id,invoiceId:n.invoice_id,approvalPurchaseId:n.approval_purchase_id,redemption});
@@ -258,7 +262,7 @@ export class Engine {
       }
       const mayCreate = await transaction(this.db,async c => {
         const {p,r}=await this.pair(c,id);
-        if (r.status!=='enabled' || !chatId.safeParse(r.recipient_chat_id).success) {await this.fail(c,p,r,'RULE_INELIGIBLE');return false;}
+        if (r.status!=='enabled' || !chatId.safeParse(r.recipient_chat_id).success || (this.authorizedRecipientChatId && r.recipient_chat_id!==this.authorizedRecipientChatId)) {await this.fail(c,p,r,'RULE_INELIGIBLE');return false;}
         await c.query("UPDATE purchases SET status='INVOICE_CREATING',updated_at=now() WHERE id=$1",[id]);
         return true;
       });
@@ -297,8 +301,8 @@ export class Engine {
         if (invoice.id!==p.invoice_id) throw new AppError('PROVIDER_MISMATCH','Invoice mismatch');
         const amount=invoiceCents(invoice);
         if (invoice.orders.length!==1) throw new AppError('UNEXPECTED_INVOICE_ORDERS','Exactly one ordered item is required');
-        if (r.status!=='enabled' || !chatId.safeParse(r.recipient_chat_id).success) throw new AppError('RULE_INELIGIBLE','Rule unavailable');
-        if (p.mode==='live' && invoice.status!=='unpaid') throw new AppError('UNEXPECTED_INVOICE_STATUS','New invoice is not unpaid');
+        if (r.status!=='enabled' || !chatId.safeParse(r.recipient_chat_id).success || (this.authorizedRecipientChatId && r.recipient_chat_id!==this.authorizedRecipientChatId)) throw new AppError('RULE_INELIGIBLE','Rule unavailable');
+        if (invoice.status!=='unpaid') throw new AppError('UNEXPECTED_INVOICE_STATUS','New invoice is not unpaid');
         await this.reserve(c,p,r,amount);
         const approval=amount>r.auto_approve_up_to_usd_cents;
         await c.query('UPDATE purchases SET amount_usd_cents=$2,status=$3,updated_at=now() WHERE id=$1',[id,amount,approval?'PENDING_APPROVAL':'READY_TO_PAY']);
@@ -326,13 +330,13 @@ export class Engine {
       throw error;
     }
     // Test simulation never calls the live adapter, even for an invoice lookup.
-    const current = p.mode==='live' ? await this.purchasing.invoice(p.invoice_id!) : null;
+    const current = await this.purchasing.invoice(p.invoice_id!);
     const order = current?.orders.length===1 ? await this.purchasing.order(current.orders[0]!.id) : null;
     const mayPay=await transaction(this.db,async c=>{
       const {p,r}=await this.pair(c,id);
       if (p.status!=='READY_TO_PAY') return false;
       try {
-        if (r.status!=='enabled' || !chatId.safeParse(r.recipient_chat_id).success) throw new AppError('RULE_INELIGIBLE','Rule unavailable');
+        if (r.status!=='enabled' || !chatId.safeParse(r.recipient_chat_id).success || (this.authorizedRecipientChatId && r.recipient_chat_id!==this.authorizedRecipientChatId)) throw new AppError('RULE_INELIGIBLE','Rule unavailable');
         if (current && (current.status!=='unpaid' || invoiceCents(current)!==p.amount_usd_cents)) throw new AppError('INVOICE_CHANGED','Invoice price or status changed; new authorization required');
         if (current && (!order || order.status!=='created' || order.productId!==r.product_id || order.invoiceId!==p.invoice_id ||
           order.productCurrency!==product.currency || Number(order.productValue)!==product.packages.find(x=>x.packageId===r.package_id)!.value)) {
@@ -378,14 +382,16 @@ export class Engine {
       }
       if (invoice.orders.length===1 && orders.length===1 && orders.every(o=>o.status==='delivered'&&o.productId===r.product_id&&(!o.invoiceId||o.invoiceId===p.invoice_id)) && invoice.status==='complete') {
         const redemption=orders[0]!.redemption;
-        if (p.mode==='live' && (!redemption || !Object.values(redemption).some(Boolean))) {
+        if (!redemption || !Object.values(redemption).some(Boolean)) {
           await c.query("UPDATE purchases SET next_attempt_at=now()+interval '30 seconds',error_code='REDEMPTION_PENDING' WHERE id=$1",[id]);return;
         }
         await c.query('UPDATE purchases SET status=$2,error_code=NULL,updated_at=now() WHERE id=$1',[id,p.mode==='live'?'DELIVERED':'TEST_DELIVERED']);
         await c.query("UPDATE spending_ledger SET state='committed',committed_at=COALESCE(committed_at,now()) WHERE purchase_id=$1",[id]);
         await this.notify(c,{key:`delivered:${id}`,chatId:r.recipient_chat_id,type:p.mode==='live'?'purchase_delivered':'test_purchase_delivered',
           text:p.mode==='live'?'Your purchase was delivered.':'TEST MODE: simulated delivery only. No real purchase or redeemable code.',
-          purchaseId:id,invoiceId:p.invoice_id,...(p.mode==='live'?{redemption}: {})});
+          purchaseId:id,invoiceId:p.invoice_id,redemption});
+        if (r.owner_chat_id!==r.recipient_chat_id) await this.notify(c,{key:`receipt:${id}`,chatId:r.owner_chat_id,type:'purchase_receipt',
+          text:`${p.mode==='test'?'TEST MODE: simulated delivery.':'Purchase delivered to the authorized private recipient.'} Invoice and order delivery verified. Charge: USD ${Math.trunc(p.amount_usd_cents!/100)}.${String(p.amount_usd_cents!%100).padStart(2,'0')}.`,purchaseId:id,invoiceId:p.invoice_id});
       } else {
         // A crash between the committed payment intent and its response is also an uncertain outcome.
         const uncertain=p.status==='PAYMENT_UNCERTAIN'||invoice.status==='unpaid';

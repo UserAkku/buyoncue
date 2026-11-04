@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { AppError } from './errors.js';
+import type { Sql } from './db.js';
 
 export interface Product {
   id: string; name: string; country: string; currency: string; inStock: boolean;
@@ -139,17 +140,30 @@ export class Bitrefill implements Catalogue, Purchasing {
 /** Deterministic, restart-safe development simulation. Never calls the provider or returns real redemption. */
 export class TestPurchasing implements Purchasing {
   readonly mode = 'test' as const;
-  async createInvoice(productId: string, _packageId: string, purchaseId: string): Promise<Invoice> {
-    const id=`test:${purchaseId}:${encodeURIComponent(productId)}`;
-    return { id, status: 'unpaid', payment: { method: 'balance', currency: 'USD', price: '1.00' }, orders: [{id,status:'created'}] };
+  constructor(private catalogue: Catalogue, private db: Sql) {}
+  private async state(id: string) {
+    if (!id.startsWith('test:')) throw new Error('Test adapter refuses live invoices');
+    const {rows} = await this.db.query(`SELECT p.payment_attempted_at,r.product_id,r.package_id
+      FROM purchases p JOIN commerce_rules r ON r.id=p.rule_id WHERE p.id=$1`,[id.slice(5)]);
+    const row=rows[0];
+    if (!row) throw new Error('Unknown simulated purchase');
+    const product=await this.catalogue.product(row.product_id);
+    const pkg=product.packages.find(p=>p.packageId===row.package_id);
+    if (!pkg) throw new Error('Unknown simulated package');
+    return {paid:!!row.payment_attempted_at,product,pkg};
   }
-  async invoice(invoiceId: string): Promise<Invoice> {
-    if (!invoiceId.startsWith('test:')) throw new Error('Test adapter refuses live invoices');
-    return { id: invoiceId, status: 'complete', payment: { method: 'balance', currency: 'USD', price: '1.00' }, orders: [{ id: invoiceId, status: 'delivered' }] };
+  async createInvoice(_productId: string, _packageId: string, purchaseId: string): Promise<Invoice> {
+    const id=`test:${purchaseId}`;
+    return {id,status:'unpaid',payment:{method:'balance',currency:'USD',price:'1.00'},orders:[{id,status:'created'}]};
   }
-  async pay(invoiceId: string) { if (!invoiceId.startsWith('test:')) throw new Error('Test adapter refuses live payment'); }
-  async order(orderId: string): Promise<Order> {
-    if (!orderId.startsWith('test:')) throw new Error('Test adapter refuses live orders');
-    return { id: orderId, status: 'delivered', productId: decodeURIComponent(orderId.split(':').slice(2).join(':')), invoiceId: orderId };
+  async invoice(id: string): Promise<Invoice> {
+    const {paid}=await this.state(id);
+    return {id,status:paid?'complete':'unpaid',payment:{method:'balance',currency:'USD',price:'1.00'},orders:[{id,status:paid?'delivered':'created'}]};
+  }
+  async pay(id: string) { if (!id.startsWith('test:')) throw new Error('Test adapter refuses live payment'); }
+  async order(id: string): Promise<Order> {
+    const {paid,product,pkg}=await this.state(id);
+    return {id,invoiceId:id,status:paid?'delivered':'created',productId:product.id,productValue:pkg.value,productCurrency:product.currency,
+      ...(paid?{redemption:{code:'TEST-NOT-REDEEMABLE',pin:null,link:null,instructions:'Simulation only; no value or real gift card.'}}:{})};
   }
 }

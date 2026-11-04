@@ -23,7 +23,8 @@ async function main() {
   if (!interpreter) logger.info("LLM credentials not set: /newrule uses the guided flow (not AI-powered)");
   if (!config.ownerUserId) logger.warn("TELEGRAM_OWNER_USER_ID not set: setup mode (/whoami only)");
 
-  const controller = new Controller({ engine, interpreter, ownerUserId: config.ownerUserId, logger });
+  const controller = new Controller({ engine, interpreter, ownerUserId: config.ownerUserId, logger,
+    verifyRecipient: async chatId => (await bot.api.getChat(chatId)).type === "private" });
   const bot = createBot({ token: config.telegramBotToken, controller, logger });
 
   const sender: Sender = {
@@ -80,6 +81,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
+  console.error("Chat service failed; check configuration and Telegram connectivity (error details suppressed)");
   process.exit(1);
 });

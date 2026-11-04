@@ -75,7 +75,7 @@ export function createBot(opts: BotOptions): Bot {
 
   bot.catch((err) => {
     // Log the failure class only; update contents may hold personal data.
-    logger.error("bot_handler_error", { reason: (err.error as Error)?.message });
+    logger.error("bot_handler_error");
   });
 
   return bot;

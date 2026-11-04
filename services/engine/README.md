@@ -39,6 +39,7 @@ curl http://localhost:3001/health
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string; required |
 | `INTERNAL_API_TOKEN` | Shared secret for the trusted adapter; at least 32 characters |
+| `AUTHORIZED_RECIPIENT_CHAT_ID` | Required in live mode: the one positive private chat ID pre-linked through Telegram |
 | `BITREFILL_API_KEY` | Personal API bearer token; required for real catalogue and live operations |
 | `BITREFILL_BASE_URL` | `https://api.bitrefill.com/v2`; other origins are rejected |
 | `PUBLIC_ENGINE_URL` | Externally reachable service URL; HTTPS required in live mode |
@@ -105,7 +106,7 @@ Trigger body:
 
 Trigger reasons: `queued`, `not_merged`, `no_eligible_rule`, `duplicate_delivery`, `duplicate_pr`. Ignored events are durably recorded. A rule must already be enabled when the event arrives. Repository names are normalized to lowercase; labels match exactly. The adapter must verify GitHub webhook signatures and derive `ownerChatId` from the authenticated Telegram sender, rather than user-provided text. Only pre-authorized `recipientChatId` receives redemption. There is no rule-update route: create and explicitly enable a revised rule to change identity, product, label or recipient. PostgreSQL also prevents identity changes after first enablement.
 
-Notification types include `rule_enabled`, `rule_paused`, `purchase_pending_approval`, `budget_exceeded`, `duplicate_event_skipped`, `invoice_created`, `payment_processing`, `purchase_delivered`, `purchase_failed`, `payment_uncertain` and `test_purchase_delivered`. A resume produces `rule_enabled`. Send each item to its exact `chatId` and acknowledge only after successful delivery. Delivery is at least once; a poller crashing after sending and before acknowledging may send the same message again. Use one active Telegram poller or coordinate pollers externally.
+Notification types include `rule_enabled`, `rule_paused`, `purchase_pending_approval`, `budget_exceeded`, `duplicate_event_skipped`, `invoice_created`, `payment_processing`, `purchase_delivered`, `purchase_failed`, `payment_uncertain` and `test_purchase_delivered` and `purchase_receipt`. A resume produces `rule_enabled`. Send each item to its exact `chatId` and acknowledge only after successful delivery. Delivery is at least once; a poller crashing after sending and before acknowledging may send the same message again. Use one active Telegram poller or coordinate pollers externally.
 
 ## Purchase and spending behavior
 
@@ -119,15 +120,15 @@ Only `READY_TO_PAY` may submit the documented `/invoices/:id/pay` call. Committe
 
 A lost invoice-creation response becomes `INVOICE_UNCERTAIN`: no replacement invoice is created and no payment is made. An unpaid invoice may remain in the provider account when a hard cap rejects it. This is intentional; invoice creation itself does not spend funds.
 
-Authenticated invoice **and order** lookups must confirm actual delivery; `complete` alone is insufficient. Failed/refunded orders never produce redemption notifications. Charges for attempted payments remain conservatively counted until an operator verifies a refund; automated refund credits and manual retry endpoints are intentionally absent. Redemption is encrypted with AES-256-GCM, bound to its notification, purchase and recipient. Only a delivered live purchase may expose it through the internal outbox; acknowledgement deletes its ciphertext. No raw invoice, order or webhook payload containing redemption is retained.
+Authenticated invoice **and order** lookups must confirm actual delivery; `complete` alone is insufficient. Failed/refunded orders never produce redemption notifications. Charges for attempted payments remain conservatively counted until an operator verifies a refund; automated refund credits and manual retry endpoints are intentionally absent. Redemption is encrypted with AES-256-GCM, bound to its notification, purchase and recipient. Only a delivered live purchase may expose it through the internal outbox; acknowledgement deletes its ciphertext. No raw invoice, order or webhook payload containing redemption is retained. The configured recipient is rechecked before enabling and payment. A different owner receives a redacted invoice-linked receipt.
 
 Webhooks are untrusted hints, so forged or repeated payloads cannot establish delivery or initiate payment. The database worker polls independently every 30 seconds for unresolved invoices. Disabling new live spending still permits authenticated, read-only reconciliation of previously submitted live payments. Mode-mismatched unpaid jobs remain deferred. Pausing a rule stops purchases before the durable payment intent; it cannot cancel a payment already submitted.
 
 ## Development and production demo
 
-With live purchasing disabled, catalogue data remains real, but the purchase adapter is a restart-safe simulation charging a clearly labeled **fictional USD 1.00** against a separate test budget. It creates `test:` invoice IDs, uses `TEST_DELIVERED`, and emits no redeemable codes. These IDs are never evidence of a real purchase. No automated test contacts Bitrefill or spends credits.
+With live purchasing disabled, catalogue data remains real, but the purchase adapter is a restart-safe simulation charging a clearly labeled **fictional USD 1.00** against a separate test budget. It creates `test:` invoice IDs, uses `TEST_DELIVERED`, and emits only an explicitly non-redeemable test marker. These IDs are never evidence of a real purchase. No automated test contacts Bitrefill or spends credits.
 
-For a real demo, a human must explicitly provision/fund a USD account, provide its Personal API key, choose a real fixed package, set affordable hard caps and intentionally configure `LIVE_PURCHASES_ENABLED=true`. Verify authentication without spending:
+For a real demo, a human must explicitly provision/fund a USD account, provide its Personal API key, choose a real fixed package, verify the recipient privately through the bot and set `AUTHORIZED_RECIPIENT_CHAT_ID`, set affordable hard caps and intentionally configure `LIVE_PURCHASES_ENABLED=true`. Verify authentication without spending:
 
 ```sh
 npm run check:bitrefill

@@ -9,7 +9,7 @@ export class FakeCatalogue implements Catalogue {
   async search(query: string,country?: string) { return (!country||country==='IN')&&query.includes('gift')?[fixtureProduct]:[]; }
 }
 export class FakePurchasing implements Purchasing {
-  readonly mode='live' as const; // In-process fake; no network access, tests exercise the live state machine.
+  readonly mode='test' as const; // In-process fake; no network access, tests exercise the live state machine.
   creates=0; pays=0; orderReads=0;
   price: string | undefined='1.00'; currency: string | undefined='USD';
   timeout=false; failedOrder=false; failCreate=false; missingRedemption=false;
@@ -17,7 +17,7 @@ export class FakePurchasing implements Purchasing {
   async createInvoice(_product: string,_package: string,_purchase: string): Promise<Invoice> {
     this.creates++;
     if (this.failCreate) throw new Error('Simulated response loss');
-    return this.invoice(randomUUID());
+    return this.invoice(`TEST-MOCK-${randomUUID()}`);
   }
   async invoice(id: string): Promise<Invoice> {
     const paid=this.paid.has(id);

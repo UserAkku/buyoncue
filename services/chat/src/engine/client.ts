@@ -60,9 +60,10 @@ export class EngineClient implements EngineApi {
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(this.timeoutMs),
+        redirect: "error",
       });
     } catch (err) {
-      throw new EngineError("offline", `Engine unreachable: ${(err as Error).message}`);
+      throw new EngineError("offline", "Engine unreachable; request outcome may be unknown");
     }
 
     const text = await res.text();

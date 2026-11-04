@@ -71,6 +71,7 @@ describe('Integer money and configuration',()=>{
     const env={DATABASE_URL:'postgresql://user:password@localhost/test',INTERNAL_API_TOKEN:'a'.repeat(32),PUBLIC_ENGINE_URL:'http://localhost:3001',REDEMPTION_ENCRYPTION_KEY:'42'.repeat(32)};
     expect(loadConfig(env).LIVE_PURCHASES_ENABLED).toBe('false');
     expect(()=>loadConfig({...env,LIVE_PURCHASES_ENABLED:'true'})).toThrow('requires');
+    expect(()=>loadConfig({...env,LIVE_PURCHASES_ENABLED:'true',BITREFILL_API_KEY:'TEST',PUBLIC_ENGINE_URL:'https://engine.example'})).toThrow('AUTHORIZED_RECIPIENT_CHAT_ID');
     expect(()=>loadConfig({...env,LIVE_PURCHASES_ENABLED:'yes'})).toThrow('Invalid configuration');
     expect(()=>loadConfig({...env,BITREFILL_BASE_URL:'https://attacker.example'})).toThrow('Invalid configuration');
   });
