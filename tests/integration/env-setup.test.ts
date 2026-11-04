@@ -63,3 +63,16 @@ test('the GitHub App group is never activated while incomplete', () => {
   assert.match(r.stdout, /Still missing/);
   assert.ok(!/GITHUB_APP_ID/.test(readFileSync(join(root, 'services/chat/.env'), 'utf8')));
 });
+
+// Real terminals wrap pasted text in ESC[200~ ... ESC[201~. That must never end up inside the saved value.
+const hasPython = spawnSync('python3', ['--version']).status === 0;
+for (const mode of ['bracketed', 'plain', 'trailing-space']) {
+  test(`hidden prompt accepts a ${mode} paste through a real pseudo-terminal`, { skip: !hasPython }, () => {
+    const root = sandbox();
+    const fake = '1234567890:AAFAKEfakeFAKEfakeFAKEfakeFAKEfake123';
+    const r = spawnSync('python3', [resolve(import.meta.dirname, 'pty-paste.py'), root, fake, mode], { encoding: 'utf8', cwd: resolve(import.meta.dirname, '../..') });
+    assert.ok(!r.stdout.includes(fake), 'token echoed');
+    assert.match(r.stdout, /saved in services\/chat\/\.env/);
+    assert.ok(readFileSync(join(root, 'services/chat/.env'), 'utf8').split('\n').includes(`TELEGRAM_BOT_TOKEN=${fake}`));
+  });
+}

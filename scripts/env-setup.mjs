@@ -172,13 +172,21 @@ async function readSecret(prompt) {
   process.stdin.resume();
   process.stdin.setEncoding('utf8');
   return new Promise((resolveValue, reject) => {
-    let value = '';
+    let raw = '';
+    // Terminals wrap pasted text in bracketed-paste markers (ESC[200~ ... ESC[201~) and arrow keys send ESC[A etc.
+    // Keep the ESC bytes while typing and strip whole escape sequences at the end, so "[200~" never leaks into the value.
+    const clean = () => raw.replace(/\u001b\[[0-9;?]*[~A-Za-z]/g, '').replace(/[^\x20-\x7e]/g, '').trim();
     const onData = (chunk) => {
       for (const ch of chunk) {
-        if (ch === '\r' || ch === '\n') { cleanup(); process.stderr.write('\n'); return resolveValue(value.trim()); }
+        if (ch === '\r' || ch === '\n') {
+          // A newline inside a bracketed paste is part of the paste, not the user pressing Enter.
+          const pasting = raw.lastIndexOf('\u001b[200~') > raw.lastIndexOf('\u001b[201~');
+          if (pasting) continue;
+          cleanup(); process.stderr.write('\n'); return resolveValue(clean());
+        }
         if (ch === '\u0003') { cleanup(); process.stderr.write('\n'); return reject(new Error('cancelled')); }
-        if (ch === '\u007f' || ch === '\b') value = value.slice(0, -1);
-        else if (ch >= ' ') value += ch;
+        if (ch === '\u007f' || ch === '\b') raw = raw.slice(0, -1);
+        else raw += ch;
       }
     };
     const cleanup = () => { process.stdin.setRawMode(false); process.stdin.pause(); process.stdin.off('data', onData); };
