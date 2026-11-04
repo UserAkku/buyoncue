@@ -19,7 +19,7 @@ createdb pactpilot_engine
 # Example DATABASE_URL: postgresql://localhost/pactpilot_engine
 ```
 
-Set a random `INTERNAL_API_TOKEN` of at least 32 characters and a 32-byte hex `REDEMPTION_ENCRYPTION_KEY`. Generate each independently with `openssl rand -hex 32`. Keep the encryption key stable across restarts and store it separately from database backups. `.env` is ignored by Git. A supplied Telegram token is stored there as `TELEGRAM_BOT_TOKEN` for the separate chat service; the engine never reads or uses it.
+Set a random `INTERNAL_API_TOKEN` of at least 32 characters and a 32-byte hex `REDEMPTION_ENCRYPTION_KEY`. Generate each independently with `openssl rand -hex 32`. Keep the encryption key stable across restarts and store it separately from database backups. `.env` is ignored by Git. Telegram/GitHub App credentials belong only in the separate chat service environment; the engine does not use them.
 
 Keep `LIVE_PURCHASES_ENABLED=false`. Set `BITREFILL_API_KEY` for authenticated **read-only** catalogue access, even in development. There is no fabricated catalogue fallback. With no key, catalogue routes return a configuration error and rules cannot be created. Set `PUBLIC_ENGINE_URL` and `PORT` (default 3001).
 
@@ -151,3 +151,9 @@ npm run build
 ```
 
 The suite covers the 14 requested safety cases, all routes, ownership, immutable identity, UTC budgets, reservation carryover, approval expiry/rejection, changed quotes, restart recovery, encrypted redemption and clearing on acknowledgement. REST adapter tests replace `fetch` and assert exact documented paths and bodies.
+
+## AI contribution bounties
+
+The backward-compatible extension adds numeric GitHub identity/repository links, draft bounty tiers, durable evidence-based AI reviews, trusted final-SHA finalization and evidence-linked receipts. It reuses this service's payment state machine, approvals, ledger and encrypted outbox. See [BOUNTY_API.md](BOUNTY_API.md) for the exact adapter contract, nested Zod schemas, safety gates and environment handoff.
+
+Apply `002_ai_bounties.sql` with the existing migration command before starting the new version. Optional engine-local `LLM_API_KEY`, `LLM_BASE_URL` and `LLM_MODEL` configure runtime scoring; missing credentials hold reviews for manual attention and do not fabricate a result. Keep live spending disabled during testing. AI subscription plans do not supply runtime inference credits; provider billing and quota must be configured separately.

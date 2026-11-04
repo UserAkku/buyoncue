@@ -17,6 +17,8 @@ export interface WorkerOptions {
   /** Owner's Telegram user ID == their private chat ID. */
   ownerChatId: string;
   logger: Logger;
+  /** Extra private chats the owner pre-authorized, e.g. contributors who linked their GitHub account. */
+  extraRecipientChats?: () => Iterable<string>;
   intervalMs?: number;
   batchSize?: number;
   maxBackoffMs?: number;
@@ -35,6 +37,7 @@ export class NotificationWorker {
   private readonly sender: Sender;
   private readonly ownerChatId: string;
   private readonly logger: Logger;
+  private readonly extraRecipientChats: () => Iterable<string>;
   private readonly intervalMs: number;
   private readonly batchSize: number;
   private readonly maxBackoffMs: number;
@@ -53,6 +56,7 @@ export class NotificationWorker {
     this.sender = opts.sender;
     this.ownerChatId = opts.ownerChatId;
     this.logger = opts.logger;
+    this.extraRecipientChats = opts.extraRecipientChats ?? (() => []);
     this.intervalMs = opts.intervalMs ?? 3000;
     this.batchSize = opts.batchSize ?? 20;
     this.maxBackoffMs = opts.maxBackoffMs ?? 5 * 60_000;
@@ -160,10 +164,12 @@ export class NotificationWorker {
     }
   }
 
-  /** The recipient must be a private chat that the owner authorized: themselves or a rule's recipient. */
+  /** The recipient must be a private chat that the owner authorized: themselves, a rule's recipient, or a verified linked contributor. */
   private async isAuthorizedPrivateChat(chatId: string): Promise<boolean> {
     if (!/^\d{1,15}$/.test(chatId) || Number(chatId) <= 0) return false; // groups/channels are negative
-    if (chatId !== this.ownerChatId) {
+    // A contributor who linked their GitHub account through the verified OAuth flow is authorized too.
+    const linked = new Set(this.extraRecipientChats());
+    if (chatId !== this.ownerChatId && !linked.has(chatId)) {
       const known = await this.recipientChats();
       if (!known.has(chatId)) {
         const fresh = await this.recipientChats(true);

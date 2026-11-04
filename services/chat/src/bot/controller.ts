@@ -15,6 +15,14 @@ import {
   toCreateRuleBody,
 } from "../rules/draft.js";
 import type { RuleInterpreter, RuleProposal } from "../rules/interpreter.js";
+import { parseProductQuery } from "../rules/query.js";
+import {
+  CONTRIBUTOR_CALLBACKS,
+  CONTRIBUTOR_COMMANDS,
+  GithubFeature,
+  OWNER_CALLBACKS,
+  OWNER_COMMANDS,
+} from "./github-feature.js";
 import { renderRule, ruleActionButtons, ruleView } from "./render.js";
 import { type Session, SessionStore } from "./session.js";
 import { type Actor, type Button, type CallbackResult, type Reply, UserFacingError } from "./types.js";
@@ -49,7 +57,13 @@ export interface ControllerDeps {
   sessions?: SessionStore;
   /** Authenticated Telegram getChat lookup; unknown recipients must start the bot first. */
   verifyRecipient?: (chatId: string) => Promise<boolean>;
+  /** GitHub App features. Absent when the GitHub App isn't configured. */
+  github?: GithubFeature;
 }
+
+const GITHUB_NOT_CONFIGURED: Reply = {
+  text: "ℹ️ GitHub App integration isn't configured on this server. The operator needs to set the GITHUB_APP_* variables (see docs/GITHUB_APP_SETUP.md).",
+};
 
 export class Controller {
   private readonly engine: EngineApi;
@@ -59,6 +73,7 @@ export class Controller {
   private readonly sessions: SessionStore;
   private readonly productCache = new Map<string, Product>();
   private readonly verifyRecipient?: (chatId: string) => Promise<boolean>;
+  private readonly github?: GithubFeature;
 
   constructor(deps: ControllerDeps) {
     this.engine = deps.engine;
@@ -67,6 +82,7 @@ export class Controller {
     this.logger = deps.logger;
     this.sessions = deps.sessions ?? new SessionStore();
     this.verifyRecipient = deps.verifyRecipient;
+    this.github = deps.github;
   }
 
   // ---------------------------------------------------------------- auth
@@ -100,6 +116,11 @@ export class Controller {
     if (cmd === "whoami") return [this.whoami(a)];
     if (cmd === "help") return [this.help(a)];
     if (cmd === "start") return [this.start(a)];
+    // Contributor commands only ever act on the caller's own identity, so any user may run them privately.
+    if (CONTRIBUTOR_COMMANDS.has(cmd)) {
+      const github = this.github;
+      return github ? this.guard(() => github.handleContributorCommand(a, cmd)) : [GITHUB_NOT_CONFIGURED];
+    }
     if (!this.isOwner(a)) return this.denied(a);
 
     return this.guard(async () => {
@@ -119,6 +140,7 @@ export class Controller {
         case "cancel":
           return [this.cancel(a)];
         default:
+          if (OWNER_COMMANDS.has(cmd)) return this.github ? this.github.handleOwnerCommand(a, cmd, args) : [GITHUB_NOT_CONFIGURED];
           return [{ text: "I don't know that command. Try /help." }];
       }
     });
@@ -127,7 +149,11 @@ export class Controller {
   async handleText(a: Actor, text: string): Promise<Reply[]> {
     if (!this.isOwner(a)) return this.denied(a);
     return this.guard(async () => {
+      if (this.github?.hasFlow(a.chatId)) return this.github.handleText(a, text);
       const s = this.sessions.get(a.chatId);
+      if (!s && GithubFeature.looksLikeConnectRequest(text)) {
+        return this.github ? this.github.connectGithub(a) : [GITHUB_NOT_CONFIGURED];
+      }
       if (!s) {
         if (!this.interpreter) {
           return [{ text: "I can set up purchase rules with a quick guided chat. Send /newrule to begin." }];
@@ -141,9 +167,17 @@ export class Controller {
   }
 
   async handleCallback(a: Actor, data: string): Promise<CallbackResult> {
-    if (!this.isOwner(a)) return { replies: [], toast: "Not authorized" };
     const [kind, ...rest] = data.split(":");
     const arg = rest.join(":");
+    if (CONTRIBUTOR_CALLBACKS.has(kind ?? "")) {
+      if (!this.github) return { replies: [GITHUB_NOT_CONFIGURED] };
+      try {
+        return await this.github.handleContributorCallback(a, kind!);
+      } catch (err) {
+        return { replies: [this.errorReply(err)] };
+      }
+    }
+    if (!this.isOwner(a)) return { replies: [], toast: "Not authorized" };
     try {
       return await this.dispatchCallback(a, kind ?? "", arg);
     } catch (err) {
@@ -184,6 +218,9 @@ export class Controller {
       case "cap":
         return { replies: await this.setCapFromCallback(a, arg) };
       default:
+        if (OWNER_CALLBACKS.has(kind)) {
+          return this.github ? this.github.handleOwnerCallback(a, kind, arg) : { replies: [GITHUB_NOT_CONFIGURED] };
+        }
         return { replies: [], toast: "That button is no longer valid" };
     }
   }
@@ -213,6 +250,7 @@ export class Controller {
         `/enable — enable a draft rule`,
         `/pause · /resume — stop or restart a rule`,
         `/status — engine mode and recent purchases`,
+        ...(this.github ? this.github.helpLines() : []),
         `/whoami — your Telegram user and chat ID`,
         `/cancel — abandon the current setup`,
         ``,
@@ -241,7 +279,9 @@ export class Controller {
   }
 
   private cancel(a: Actor): Reply {
-    return this.sessions.clear(a.chatId)
+    const clearedRule = this.sessions.clear(a.chatId);
+    const clearedGithub = this.github?.cancel(a.chatId) ?? false;
+    return clearedRule || clearedGithub
       ? { text: "Okay, setup cancelled. Nothing was created." }
       : { text: "There's nothing to cancel." };
   }
@@ -769,12 +809,4 @@ export class Controller {
   }
 }
 
-/** "flipkart" -> {query: "flipkart"}; "amazon US" -> {query: "amazon", country: "US"}. */
-export function parseProductQuery(text: string): { query: string; country?: string } {
-  const tokens = text.trim().replace(/\s+/g, " ").split(" ").filter(Boolean);
-  const last = tokens[tokens.length - 1];
-  if (tokens.length >= 2 && last && /^[A-Za-z]{2}$/.test(last)) {
-    return { query: tokens.slice(0, -1).join(" ").slice(0, 60), country: last.toUpperCase() };
-  }
-  return { query: tokens.join(" ").slice(0, 60) };
-}
+export { parseProductQuery } from "../rules/query.js";

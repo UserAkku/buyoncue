@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { assertBountyPurchase } from './bounty/policy.js';
 import { type Catalogue, type Purchasing, type Invoice, type Order, type Redemption, invoiceCents } from './bitrefill.js';
 import { type Db, type Sql, publicRow, transaction } from './db.js';
 import { AppError } from './errors.js';
@@ -9,11 +10,12 @@ interface Rule {
   id: string; owner_chat_id: string; recipient_chat_id: string; name: string; repository: string;
   required_label: string; product_id: string; package_id: string; status: string;
   per_purchase_cap_usd_cents: number; daily_cap_usd_cents: number; monthly_cap_usd_cents: number;
-  auto_approve_up_to_usd_cents: number;
+  auto_approve_up_to_usd_cents: number; kind: 'fixed' | 'bounty'; expected_face_value_inr?:number;
 }
 interface Purchase {
   id: string; rule_id: string; status: string; invoice_id: string | null; amount_usd_cents: number | null;
   mode: 'live' | 'test'; payment_attempted_at: Date | null;
+  reward_product_id:string|null;reward_package_id:string|null;reward_recipient_chat_id:string|null;reward_face_value_inr:number|null;requires_owner_approval:boolean;
 }
 interface Note {
   key: string; chatId: string; type: string; text: string; purchaseId?: string;
@@ -29,6 +31,24 @@ export class Engine {
     private authorizedRecipientChatId?: string) {
     if (purchasing.mode === 'live' && !liveEnabled) throw new Error('Live purchasing adapter forbidden while disabled');
   }
+  defaultRecipient(owner:string) { return this.authorizedRecipientChatId??owner; }
+  recipientAllowed(recipient:string) {return !this.authorizedRecipientChatId||this.authorizedRecipientChatId===recipient;}
+  private effectiveRule(r:Rule,p:Purchase):Rule {
+    return p.reward_product_id?{...r,product_id:p.reward_product_id,package_id:p.reward_package_id!,recipient_chat_id:p.reward_recipient_chat_id!,expected_face_value_inr:p.reward_face_value_inr!}:r;
+  }
+  private async validatePurchasePackage(r:Rule) {
+    try {
+      const product=await this.validatePackage(r.product_id,r.package_id);
+      if(r.expected_face_value_inr!==undefined&&(product.currency!=='INR'||product.country!=='IN'||!product.packages.some(p=>p.packageId===r.package_id&&p.value===r.expected_face_value_inr)))throw new AppError('INVALID_PACKAGE','Authorized bounty denomination changed');
+      return product;
+    } catch(error) {
+      if(r.kind==='bounty'&&error instanceof AppError&&error.code==='INVALID_PACKAGE')await this.db.query(`UPDATE bounty_rules SET tiers=(
+        SELECT jsonb_agg(CASE WHEN value->>'productId'=$2 AND value->>'packageId'=$3 THEN value||'{"enabled":false,"disabledReason":"LIVE_CATALOGUE_UNAVAILABLE"}'::jsonb ELSE value END)
+        FROM jsonb_array_elements(tiers)) WHERE rule_id=$1`,[r.id,r.product_id,r.package_id]);
+      throw error;
+    }
+  }
+  private async authorizeBounty(c:Sql,p:Purchase) {if(p.reward_product_id)await assertBountyPurchase(c,p.id);}
   private async notify(c: Sql, n: Note) {
     const id = randomUUID();
     const context = `${id}:${n.chatId}:${n.purchaseId ?? ''}`;
@@ -73,7 +93,18 @@ export class Engine {
     const found = await this.db.query<Rule>('SELECT * FROM commerce_rules WHERE id=$1 AND owner_chat_id=$2', [id,ownerChatId]);
     const initial = found.rows[0];
     if (!initial) throw new AppError('RULE_NOT_FOUND', 'Rule not found for this owner', 404);
-    if (action !== 'pause') await this.validatePackage(initial.product_id, initial.package_id);
+    if (action !== 'pause') {
+      if(initial.kind==='bounty') {
+        const b=(await this.db.query('SELECT tiers FROM bounty_rules WHERE rule_id=$1',[id])).rows[0];
+        let anyAvailable=false;
+        for(const t of b.tiers as {enabled:boolean;productId:string;packageId:string;faceValueINR:number}[]) {
+          if(!t.enabled)continue;
+          const p=await this.catalogue.product(t.productId);
+          if(p.inStock&&p.country==='IN'&&p.currency==='INR'&&p.packages.some(p=>p.packageId===t.packageId&&p.value===t.faceValueINR))anyAvailable=true;
+        }
+        if(!anyAvailable)throw new AppError('NO_AVAILABLE_BOUNTY_TIER','No verified bounty tier is currently available');
+      } else await this.validatePackage(initial.product_id, initial.package_id);
+    }
     return transaction(this.db, async c => {
       const r = await this.ownedRule(c,id,ownerChatId);
       if (action!=='pause' && this.authorizedRecipientChatId && r.recipient_chat_id!==this.authorizedRecipientChatId) throw new AppError('RECIPIENT_NOT_AUTHORIZED','Recipient is not the configured pre-linked private chat');
@@ -102,7 +133,7 @@ export class Engine {
       let reason = event.merged ? 'no_eligible_rule' : 'not_merged';
       if (event.merged) {
         // Lock matching rules so enable/pause and event acceptance have a defined order.
-        const rules = await c.query<Rule>("SELECT * FROM commerce_rules WHERE repository=$1 AND status='enabled' ORDER BY id FOR UPDATE",[event.repository]);
+        const rules = await c.query<Rule>("SELECT * FROM commerce_rules WHERE repository=$1 AND status='enabled' AND kind='fixed' ORDER BY id FOR UPDATE",[event.repository]);
         let count = 0;
         for (const r of rules.rows) {
           if (!event.labels.includes(r.required_label)) continue;
@@ -157,7 +188,7 @@ export class Engine {
     if (!lookup.rows[0]) throw new AppError('PURCHASE_NOT_FOUND','Purchase not found',404);
     const rule = await c.query<Rule>('SELECT * FROM commerce_rules WHERE id=$1 FOR UPDATE',[lookup.rows[0].rule_id]);
     const purchase = await c.query<Purchase>('SELECT * FROM purchases WHERE id=$1 FOR UPDATE',[id]);
-    return { p:purchase.rows[0]!,r:rule.rows[0]! };
+    return { p:purchase.rows[0]!,r:this.effectiveRule(rule.rows[0]!,purchase.rows[0]!) };
   }
   async approval(id: string, owner: string, decision: 'approve' | 'reject') {
     chatId.parse(owner);
@@ -177,6 +208,7 @@ export class Engine {
         await this.fail(c,p,r,'APPROVAL_REJECTED');
       } else {
         if (r.status !== 'enabled') throw new AppError('RULE_PAUSED','Rule is not enabled',409);
+        await this.authorizeBounty(c,p);
         await this.budget(c,p,r,a.amount_usd_cents);
         await c.query("UPDATE approvals SET status='approved',decided_at=now() WHERE purchase_id=$1",[id]);
         await c.query("UPDATE purchases SET status='READY_TO_PAY',next_attempt_at=now(),updated_at=now() WHERE id=$1",[id]);
@@ -195,7 +227,7 @@ export class Engine {
         // Defense in depth: delivery authorization is rechecked at read time.
         const auth = await this.db.query(`SELECT 1 FROM purchases p JOIN commerce_rules r ON r.id=p.rule_id
           WHERE p.id=$1 AND ((p.status='DELIVERED' AND p.mode='live') OR (p.status='TEST_DELIVERED' AND p.mode='test' AND $4='test_purchase_delivered'))
-          AND r.recipient_chat_id=$2 AND p.invoice_id=$3`,[n.purchase_id,n.chat_id,n.invoice_id,n.type]);
+          AND COALESCE(p.reward_recipient_chat_id,r.recipient_chat_id)=$2 AND p.invoice_id=$3`,[n.purchase_id,n.chat_id,n.invoice_id,n.type]);
         if (auth.rowCount) redemption=this.secrets.open(n.redemption_ciphertext,`${n.id}:${n.chat_id}:${n.purchase_id}`);
       }
       items.push({id:n.id,chatId:n.chat_id,type:n.type,text:n.text,purchaseId:n.purchase_id,invoiceId:n.invoice_id,approvalPurchaseId:n.approval_purchase_id,redemption});
@@ -252,8 +284,8 @@ export class Engine {
       return;
     }
     if (p.status === 'QUEUED') {
-      const r = (await this.db.query<Rule>('SELECT * FROM commerce_rules WHERE id=$1',[p.rule_id])).rows[0]!;
-      try { await this.validatePackage(r.product_id,r.package_id); }
+      const r = this.effectiveRule((await this.db.query<Rule>('SELECT * FROM commerce_rules WHERE id=$1',[p.rule_id])).rows[0]!,p);
+      try { await this.validatePurchasePackage(r); }
       catch (error) {
         if (error instanceof AppError && error.code==='INVALID_PACKAGE') {
           await transaction(this.db,async c => {const {p,r}=await this.pair(c,id);await this.fail(c,p,r,'INVALID_PACKAGE');});
@@ -263,6 +295,7 @@ export class Engine {
       const mayCreate = await transaction(this.db,async c => {
         const {p,r}=await this.pair(c,id);
         if (r.status!=='enabled' || !chatId.safeParse(r.recipient_chat_id).success || (this.authorizedRecipientChatId && r.recipient_chat_id!==this.authorizedRecipientChatId)) {await this.fail(c,p,r,'RULE_INELIGIBLE');return false;}
+        try {await this.authorizeBounty(c,p);}catch(error){if(!(error instanceof AppError))throw error;await this.fail(c,p,r,error.code);return false;}
         await c.query("UPDATE purchases SET status='INVOICE_CREATING',updated_at=now() WHERE id=$1",[id]);
         return true;
       });
@@ -299,12 +332,13 @@ export class Engine {
       if (p.status!=='QUOTED') return;
       try {
         if (invoice.id!==p.invoice_id) throw new AppError('PROVIDER_MISMATCH','Invoice mismatch');
+        await this.authorizeBounty(c,p);
         const amount=invoiceCents(invoice);
         if (invoice.orders.length!==1) throw new AppError('UNEXPECTED_INVOICE_ORDERS','Exactly one ordered item is required');
         if (r.status!=='enabled' || !chatId.safeParse(r.recipient_chat_id).success || (this.authorizedRecipientChatId && r.recipient_chat_id!==this.authorizedRecipientChatId)) throw new AppError('RULE_INELIGIBLE','Rule unavailable');
         if (invoice.status!=='unpaid') throw new AppError('UNEXPECTED_INVOICE_STATUS','New invoice is not unpaid');
         await this.reserve(c,p,r,amount);
-        const approval=amount>r.auto_approve_up_to_usd_cents;
+        const approval=p.requires_owner_approval||amount>r.auto_approve_up_to_usd_cents;
         await c.query('UPDATE purchases SET amount_usd_cents=$2,status=$3,updated_at=now() WHERE id=$1',[id,amount,approval?'PENDING_APPROVAL':'READY_TO_PAY']);
         if (approval) {
           await c.query(`INSERT INTO approvals(purchase_id,status,amount_usd_cents,expires_at)
@@ -320,9 +354,9 @@ export class Engine {
   }
   private async pay(id: string) {
     const p=(await this.db.query<Purchase>('SELECT * FROM purchases WHERE id=$1',[id])).rows[0]!;
-    const rule=(await this.db.query<Rule>('SELECT * FROM commerce_rules WHERE id=$1',[p.rule_id])).rows[0]!;
+    const rule=this.effectiveRule((await this.db.query<Rule>('SELECT * FROM commerce_rules WHERE id=$1',[p.rule_id])).rows[0]!,p);
     let product;
-    try { product=await this.validatePackage(rule.product_id,rule.package_id); }
+    try { product=await this.validatePurchasePackage(rule); }
     catch(error) {
       if (error instanceof AppError && error.code==='INVALID_PACKAGE') {
         await transaction(this.db,async c=>{const {p,r}=await this.pair(c,id);await this.fail(c,p,r,'INVALID_PACKAGE');});
@@ -332,10 +366,18 @@ export class Engine {
     // Test simulation never calls the live adapter, even for an invoice lookup.
     const current = await this.purchasing.invoice(p.invoice_id!);
     const order = current?.orders.length===1 ? await this.purchasing.order(current.orders[0]!.id) : null;
+    const balance=p.reward_product_id?await this.purchasing.balance?.():null;
     const mayPay=await transaction(this.db,async c=>{
       const {p,r}=await this.pair(c,id);
       if (p.status!=='READY_TO_PAY') return false;
       try {
+        await this.authorizeBounty(c,p);
+        if(p.reward_product_id) {
+          if(!balance||balance.currency!=='USD')throw new AppError('BALANCE_UNVERIFIED','An authenticated USD account balance is required');
+          let cents:number;
+          try {cents=/^0(?:\.0{1,2})?$/.test(String(balance.balance))?0:invoiceCents({id:'balance',status:'balance',orders:[],payment:{method:'balance',currency:balance.currency,price:balance.balance}});}catch{throw new AppError('BALANCE_UNVERIFIED','Balance cannot be safely determined');}
+          if(cents<p.amount_usd_cents!)throw new AppError('INSUFFICIENT_BALANCE','Insufficient verified account balance');
+        }
         if (r.status!=='enabled' || !chatId.safeParse(r.recipient_chat_id).success || (this.authorizedRecipientChatId && r.recipient_chat_id!==this.authorizedRecipientChatId)) throw new AppError('RULE_INELIGIBLE','Rule unavailable');
         if (current && (current.status!=='unpaid' || invoiceCents(current)!==p.amount_usd_cents)) throw new AppError('INVOICE_CHANGED','Invoice price or status changed; new authorization required');
         if (current && (!order || order.status!=='created' || order.productId!==r.product_id || order.invoiceId!==p.invoice_id ||
@@ -343,7 +385,7 @@ export class Engine {
           throw new AppError('INVOICE_ORDER_MISMATCH','Invoice order does not match the authorized product and package');
         }
         const a=(await c.query('SELECT *,expires_at<=now() AS expired FROM approvals WHERE purchase_id=$1',[id])).rows[0];
-        if (p.amount_usd_cents!>r.auto_approve_up_to_usd_cents && (!a || a.status!=='approved' || a.expired || a.amount_usd_cents!==p.amount_usd_cents)) throw new AppError('APPROVAL_EXPIRED','Valid approval required');
+        if ((p.requires_owner_approval||p.amount_usd_cents!>r.auto_approve_up_to_usd_cents) && (!a || a.status!=='approved' || a.expired || a.amount_usd_cents!==p.amount_usd_cents)) throw new AppError('APPROVAL_EXPIRED','Valid approval required');
         await this.budget(c,p,r,p.amount_usd_cents!);
         await c.query("UPDATE purchases SET status='PAYMENT_PROCESSING',payment_attempted_at=now(),updated_at=now() WHERE id=$1",[id]);
         await this.notify(c,{key:`paying:${id}`,chatId:r.owner_chat_id,type:'payment_processing',purchaseId:id,invoiceId:p.invoice_id,
@@ -380,7 +422,11 @@ export class Engine {
       if (terminalInvoice.has(invoice.status) || orders.some(o=>o.status==='failed'||o.status==='refunded')) {
         await this.fail(c,p,r,'PROVIDER_DELIVERY_FAILED');return;
       }
-      if (invoice.orders.length===1 && orders.length===1 && orders.every(o=>o.status==='delivered'&&o.productId===r.product_id&&(!o.invoiceId||o.invoiceId===p.invoice_id)) && invoice.status==='complete') {
+      if(p.reward_product_id&&invoice.status==='complete'&&orders.length===1&&orders[0]!.status==='delivered'&&
+        (orders[0]!.productId!==r.product_id||orders[0]!.productCurrency!=='INR'||Number(orders[0]!.productValue)!==r.expected_face_value_inr||(orders[0]!.invoiceId&&orders[0]!.invoiceId!==p.invoice_id))) {
+        await this.fail(c,p,r,'PROVIDER_ORDER_MISMATCH');return;
+      }
+      if (invoice.orders.length===1 && orders.length===1 && orders.every(o=>o.status==='delivered'&&o.productId===r.product_id&&(!o.invoiceId||o.invoiceId===p.invoice_id)&&(r.expected_face_value_inr===undefined||(o.productCurrency==='INR'&&Number(o.productValue)===r.expected_face_value_inr))) && invoice.status==='complete') {
         const redemption=orders[0]!.redemption;
         if (!redemption || !Object.values(redemption).some(Boolean)) {
           await c.query("UPDATE purchases SET next_attempt_at=now()+interval '30 seconds',error_code='REDEMPTION_PENDING' WHERE id=$1",[id]);return;
