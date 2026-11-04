@@ -21,6 +21,9 @@ else {
     const owner = process.env.TELEGRAM_OWNER_USER_ID;
     result.telegram.ownerConfigured = !!owner;
     if (owner) result.telegram.ownerPrivateChatVerified = (await telegram('getChat', {chat_id: owner})).type === 'private';
+    const recipient = process.env.AUTHORIZED_RECIPIENT_CHAT_ID;
+    result.telegram.recipientConfigured = !!recipient;
+    if (recipient) result.telegram.recipientPrivateChatVerified = await telegram('getChat', {chat_id: recipient}).then(c => c.type === 'private', () => false);
   } catch { result.telegram = { status: 'BLOCKED', reason: 'Telegram identity/configuration checks unavailable; credentials and provider error details suppressed' }; }
 }
 if (!process.env.BITREFILL_API_KEY) result.bitrefill = { status: 'BLOCKED', reason: 'BITREFILL_API_KEY missing; no authenticated catalogue/balance evidence' };

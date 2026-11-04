@@ -2,11 +2,22 @@
   "name": "pactpilot-baseline",
   "private": true,
   "scripts": {
-    "test:integration": "LIVE_PURCHASES_ENABLED=false services/engine/node_modules/.bin/tsx --test tests/integration/baseline.test.ts tests/integration/ai-bounty-e2e.test.ts",
+    "test:integration": "LIVE_PURCHASES_ENABLED=false services/engine/node_modules/.bin/tsx --test tests/integration/baseline.test.ts tests/integration/ai-bounty-e2e.test.ts tests/integration/audit-config.test.ts",
     "test": "npm --prefix services/engine test && npm --prefix services/chat test && npm run test:integration",
     "build": "npm --prefix services/engine run build && npm --prefix services/chat run build",
     "typecheck": "npm --prefix services/engine run typecheck && npm --prefix services/chat run typecheck && services/engine/node_modules/.bin/tsc -p tests/integration/tsconfig.json",
-    "check:live": "node --env-file=services/engine/.env --env-file=services/chat/.env scripts/check-live.mjs"
+    "check:live": "node --env-file=services/engine/.env --env-file=services/chat/.env scripts/check-live.mjs",
+    "audit:config": "node scripts/audit-config.mjs",
+    "audit:config:probe": "node scripts/audit-config.mjs --probe",
+    "check:bedrock:chat": "node --env-file=services/chat/.env scripts/check-bedrock.mjs CHAT",
+    "check:bedrock:review": "node --env-file=services/engine/.env scripts/check-bedrock.mjs REVIEW",
+    "env:repair": "node scripts/env-setup.mjs repair",
+    "env:status": "node scripts/env-setup.mjs status",
+    "env:set": "node scripts/env-setup.mjs set",
+    "env:sync-token": "node scripts/env-setup.mjs sync-token",
+    "env:github-key": "node scripts/env-setup.mjs github-key",
+    "env:public-url": "node scripts/env-setup.mjs public-url",
+    "env:github-activate": "node scripts/env-setup.mjs github-activate"
   },
   "type": "module"
 }
