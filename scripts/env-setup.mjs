@@ -172,13 +172,21 @@ async function readSecret(prompt) {
   process.stdin.resume();
   process.stdin.setEncoding('utf8');
   return new Promise((resolveValue, reject) => {
-    let value = '';
+    let raw = '';
+    // Terminals wrap pasted text in bracketed-paste markers (ESC[200~ ... ESC[201~) and arrow keys send ESC[A etc.
+    // Keep the ESC bytes while typing and strip whole escape sequences at the end, so "[200~" never leaks into the value.
+    const clean = () => raw.replace(/\u001b\[[0-9;?]*[~A-Za-z]/g, '').replace(/[^\x20-\x7e]/g, '').trim();
     const onData = (chunk) => {
       for (const ch of chunk) {
-        if (ch === '\r' || ch === '\n') { cleanup(); process.stderr.write('\n'); return resolveValue(value.trim()); }
+        if (ch === '\r' || ch === '\n') {
+          // A newline inside a bracketed paste is part of the paste, not the user pressing Enter.
+          const pasting = raw.lastIndexOf('\u001b[200~') > raw.lastIndexOf('\u001b[201~');
+          if (pasting) continue;
+          cleanup(); process.stderr.write('\n'); return resolveValue(clean());
+        }
         if (ch === '\u0003') { cleanup(); process.stderr.write('\n'); return reject(new Error('cancelled')); }
-        if (ch === '\u007f' || ch === '\b') value = value.slice(0, -1);
-        else if (ch >= ' ') value += ch;
+        if (ch === '\u007f' || ch === '\b') raw = raw.slice(0, -1);
+        else raw += ch;
       }
     };
     const cleanup = () => { process.stdin.setRawMode(false); process.stdin.pause(); process.stdin.off('data', onData); };
@@ -188,7 +196,15 @@ async function readSecret(prompt) {
 
 async function setVar(target, name, replace) {
   const spec = SETTABLE[name];
-  if (!spec) { say(`Refusing: ${name} is not settable here. Settable: ${Object.keys(SETTABLE).join(', ')}`); process.exit(2); }
+  // Never echo the argument: people sometimes type the secret itself instead of the variable name.
+  if (!spec) {
+    const looksSecret = typeof name === 'string' && (/[:=]/.test(name) || name.length > 40 || /[a-z0-9]{20,}/i.test(name) && !/^[A-Z0-9_]+$/.test(name));
+    say(looksSecret
+      ? 'Refusing: that argument looks like a SECRET VALUE, not a variable name. It is now in your shell history: revoke/rotate it at the provider. Usage: npm run env:set -- <chat|engine|both> <VARIABLE_NAME>, then paste the value at the hidden prompt.'
+      : `Refusing: unknown variable name. Settable: ${Object.keys(SETTABLE).join(', ')}`);
+    process.exit(2);
+  }
+  if (!['chat', 'engine', 'both'].includes(target)) { say('First argument must be chat, engine or both.'); process.exit(2); }
   const services = spec.svc[0] === 'github' ? ['github'] : target === 'both' ? spec.svc : [target];
   if (!services.every((s) => spec.svc.includes(s))) { say(`${name} belongs in: ${spec.svc.join(' and ')}`); process.exit(2); }
   for (const s of services) {
