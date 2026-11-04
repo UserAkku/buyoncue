@@ -188,7 +188,15 @@ async function readSecret(prompt) {
 
 async function setVar(target, name, replace) {
   const spec = SETTABLE[name];
-  if (!spec) { say(`Refusing: ${name} is not settable here. Settable: ${Object.keys(SETTABLE).join(', ')}`); process.exit(2); }
+  // Never echo the argument: people sometimes type the secret itself instead of the variable name.
+  if (!spec) {
+    const looksSecret = typeof name === 'string' && (/[:=]/.test(name) || name.length > 40 || /[a-z0-9]{20,}/i.test(name) && !/^[A-Z0-9_]+$/.test(name));
+    say(looksSecret
+      ? 'Refusing: that argument looks like a SECRET VALUE, not a variable name. It is now in your shell history: revoke/rotate it at the provider. Usage: npm run env:set -- <chat|engine|both> <VARIABLE_NAME>, then paste the value at the hidden prompt.'
+      : `Refusing: unknown variable name. Settable: ${Object.keys(SETTABLE).join(', ')}`);
+    process.exit(2);
+  }
+  if (!['chat', 'engine', 'both'].includes(target)) { say('First argument must be chat, engine or both.'); process.exit(2); }
   const services = spec.svc[0] === 'github' ? ['github'] : target === 'both' ? spec.svc : [target];
   if (!services.every((s) => spec.svc.includes(s))) { say(`${name} belongs in: ${spec.svc.join(' and ')}`); process.exit(2); }
   for (const s of services) {
