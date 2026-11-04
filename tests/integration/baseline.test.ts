@@ -257,3 +257,8 @@ test('empty or extra invoice orders fail before any payment',async()=>{
   const original=payments.invoice.bind(payments);payments.invoice=async id=>({...await original(id),orders:[]});await rule();
   assert.equal((await processEvent()).errorCode,'UNEXPECTED_INVOICE_ORDERS');assert.equal(payments.pays.length,0);
 });
+
+test('new GitHub App client contract mismatch is rejected safely by the actual engine',async()=>{
+  await assert.rejects(client.linkGithub({githubUserId:'202',githubLogin:'contributor',telegramUserId:recipient,chatId:recipient}),{kind:'http',status:400});
+  assert.equal(payments.creates.length,0);
+});

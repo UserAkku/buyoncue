@@ -1,3 +1,4 @@
+import { bedrockConfig } from './bedrock.js';
 import { loadConfig } from './config.js';
 import { database } from './db.js';
 import { Bitrefill, TestPurchasing } from './bitrefill.js';
@@ -14,8 +15,9 @@ async function main() {
   const provider=new Bitrefill(config.BITREFILL_API_KEY,config.BITREFILL_BASE_URL,config.PUBLIC_ENGINE_URL);
   const live=config.LIVE_PURCHASES_ENABLED==='true';
   const engine=new Engine(db,provider,live?provider:new TestPurchasing(provider,db),live,new SecretBox(config.REDEMPTION_ENCRYPTION_KEY),config.APPROVAL_TTL_SECONDS,provider,config.AUTHORIZED_RECIPIENT_CHAT_ID);
-  const reviewer=config.LLM_API_KEY&&config.LLM_BASE_URL&&config.LLM_MODEL?new CompatibleReviewer(config.LLM_MODEL,config.LLM_API_KEY,config.LLM_BASE_URL):new UnconfiguredReviewer();
-  const bounties=new BountyService(engine,reviewer,{minimumConfidence:config.AI_REVIEW_MIN_CONFIDENCE,reviewMaxAgeSeconds:config.AI_REVIEW_MAX_AGE_SECONDS,allowPrivateRepositories:config.AI_ALLOW_PRIVATE_REPOSITORIES==='true'});
+  const bedrock=bedrockConfig(process.env,'REVIEW');
+  const reviewer=bedrock?new CompatibleReviewer(bedrock.model,bedrock.apiKey,bedrock.baseUrl,bedrock.fetchImpl):config.LLM_API_KEY&&config.LLM_BASE_URL&&config.LLM_MODEL?new CompatibleReviewer(config.LLM_MODEL,config.LLM_API_KEY,config.LLM_BASE_URL):new UnconfiguredReviewer();
+  const bounties=new BountyService(engine,reviewer,{maxCallsPerPr:config.LLM_REVIEW_MAX_CALLS_PER_PR,minimumConfidence:config.AI_REVIEW_MIN_CONFIDENCE,reviewMaxAgeSeconds:config.AI_REVIEW_MAX_AGE_SECONDS,allowPrivateRepositories:config.AI_ALLOW_PRIVATE_REPOSITORIES==='true'});
   const app=buildApp(engine,config.INTERNAL_API_TOKEN,bounties);
   let running:Promise<void>|undefined;
   let reviewing:Promise<void>|undefined;

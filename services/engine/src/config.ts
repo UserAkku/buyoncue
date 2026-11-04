@@ -11,6 +11,7 @@ const schema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(3001),
   REDEMPTION_ENCRYPTION_KEY: z.string().regex(/^[a-fA-F0-9]{64}$/),
   APPROVAL_TTL_SECONDS: z.coerce.number().int().min(30).max(86400).default(900),
+  LLM_REVIEW_MAX_CALLS_PER_PR:z.coerce.number().int().min(1).max(10).default(3),
   LLM_API_KEY:z.string().optional(),
   LLM_BASE_URL:z.preprocess(v=>v===''?undefined:v,z.string().url().optional()),
   LLM_MODEL:z.string().optional(),

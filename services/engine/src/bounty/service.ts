@@ -17,14 +17,15 @@ interface ReviewRow {
 const RULE_SQL=`SELECT c.*,b.repository_id,b.policy_version,b.require_successful_ci,b.score_threshold,b.minimum_confidence,b.allow_self_reward,b.tiers,
  r.repository_full_name,r.installation_id,r.owner_github_user_id,r.repository_private FROM bounty_rules b
  JOIN commerce_rules c ON c.id=b.rule_id JOIN connected_repositories r ON r.repository_id=b.repository_id`;
-export interface BountyOptions {minimumConfidence?:number;allowPrivateRepositories?:boolean;reviewMaxAgeSeconds?:number;}
+export interface BountyOptions {minimumConfidence?:number;allowPrivateRepositories?:boolean;reviewMaxAgeSeconds?:number;maxCallsPerPr?:number;}
 export class BountyService {
   readonly db:Db;
   private minimumConfidence:number;
   private allowPrivate:boolean;
   private maxAge:number;
+  private maxCalls:number;
   constructor(readonly engine:Engine,readonly reviewer:Reviewer,options:BountyOptions={}) {
-    this.db=engine.db;this.minimumConfidence=options.minimumConfidence??0.8;this.allowPrivate=options.allowPrivateRepositories??false;this.maxAge=options.reviewMaxAgeSeconds??3600;
+    this.db=engine.db;this.minimumConfidence=options.minimumConfidence??0.8;this.allowPrivate=options.allowPrivateRepositories??false;this.maxAge=options.reviewMaxAgeSeconds??3600;this.maxCalls=options.maxCallsPerPr??3;
   }
   private async rule(c:Sql,id:string,lock=false):Promise<RuleRow> {
     const row=(await c.query<RuleRow>(RULE_SQL+' WHERE c.id=$1'+(lock?' FOR UPDATE OF c':''),[id])).rows[0];
@@ -104,6 +105,8 @@ export class BountyService {
       const hash=evidenceHash(evidence);
       const old=(await c.query('SELECT id,state,eligibility_state FROM contribution_reviews WHERE rule_id=$1 AND repository_id=$2 AND pr_number=$3 AND head_sha=$4 AND evidence_hash=$5',[rule.id,input.repositoryId,input.prNumber,input.headSha,hash])).rows[0];
       if(old)return {reviewId:old.id,state:old.state,eligibilityState:old.eligibility_state};
+      const attempts=(await c.query('SELECT count(*)::int AS count FROM contribution_reviews WHERE rule_id=$1 AND pr_number=$2',[rule.id,input.prNumber])).rows[0].count;
+      if(attempts>=this.maxCalls)throw new AppError('REVIEW_CALL_LIMIT','Review attempt limit reached for this policy and PR',409);
       await c.query("UPDATE contribution_reviews SET state='STALE',eligibility_state='HOLD',hold_reasons='[\"SUPERSEDED_EVIDENCE\"]',updated_at=now() WHERE rule_id=$1 AND pr_number=$2 AND state<>'STALE'",[rule.id,input.prNumber]);
       const id=randomUUID();const validUntil=new Date(Math.min(Date.now(),Date.parse(input.collectedAt))+this.maxAge*1000);
       await c.query(`INSERT INTO contribution_reviews(id,rule_id,repository_id,installation_id,pr_number,head_sha,author_github_user_id,evidence_hash,state,model,valid_until)

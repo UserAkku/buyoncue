@@ -291,3 +291,8 @@ describe('Provider outages before financial side effects',()=>{
     catalogue.product=original;expect((await finalize(r.reviewId,{githubDeliveryId:id})).data.accepted).toBe(true);await engine.tick();expect(payments.pays).toBe(1);
   });
 });
+
+it('bounds durable review attempts per PR without calling the model again',async()=>{
+ await setup();for(let i=0;i<3;i++)await reviewed(evidence({description:`Revision ${i}`}));
+ const denied=await http('/v1/contributions/review',evidence({description:'Revision 4'}));expect(denied.status).toBe(409);expect(denied.data.error.code).toBe('REVIEW_CALL_LIMIT');expect(reviewer.calls).toHaveLength(3);
+});

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { bedrockConfig } from "./bedrock.js";
 import { z } from "zod";
 
 const blank = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
@@ -74,7 +76,7 @@ export interface Config {
   engineUrl: string;
   internalApiToken: string;
   githubWebhookSecret: string;
-  llm: { apiKey: string; baseUrl: string; model: string } | null;
+  llm: { apiKey: string; baseUrl: string; model: string; fetchImpl?: typeof fetch } | null;
   port: number;
   /** null = GitHub App features disabled (legacy webhook + rules still work). */
   github: GithubAppConfig | null;
@@ -82,7 +84,12 @@ export interface Config {
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
-  const parsed = EnvSchema.safeParse(env);
+  const prepared = {...env};
+  if(env.GITHUB_APP_PRIVATE_KEY_PATH) {
+    if(env.GITHUB_APP_PRIVATE_KEY)throw new Error("Configure a private key path or inline PEM, not both");
+    try {prepared.GITHUB_APP_PRIVATE_KEY=readFileSync(env.GITHUB_APP_PRIVATE_KEY_PATH,"utf8");}catch{throw new Error("Cannot read GITHUB_APP_PRIVATE_KEY_PATH");}
+  }
+  const parsed = EnvSchema.safeParse(prepared);
   if (!parsed.success) {
     const lines = parsed.error.issues.map((i) => `  - ${i.path.join(".")}: ${i.message}`);
     throw new Error(`Invalid configuration:\n${lines.join("\n")}`);
@@ -90,9 +97,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const e = parsed.data;
   const github = buildGithubConfig(e);
   // The LLM is all-or-nothing: a partial configuration falls back to guided mode.
-  const llm = e.LLM_API_KEY && e.LLM_BASE_URL && e.LLM_MODEL
+  const llm = bedrockConfig(env,'CHAT') ?? (e.LLM_API_KEY && e.LLM_BASE_URL && e.LLM_MODEL
     ? { apiKey: e.LLM_API_KEY, baseUrl: e.LLM_BASE_URL.replace(/\/+$/, ""), model: e.LLM_MODEL }
-    : null;
+    : null);
   return {
     telegramBotToken: e.TELEGRAM_BOT_TOKEN,
     ownerUserId: e.TELEGRAM_OWNER_USER_ID ?? null,
