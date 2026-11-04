@@ -1,6 +1,6 @@
-# PactPilot
+# BuyOnCue
 
-**A Telegram-native autonomous commerce agent.** Describe a purchasing rule once, in plain language. When an authorized GitHub event happens later (a PR is merged), PactPilot buys a real [Bitrefill](https://www.bitrefill.com) gift card for you, inside spending limits you set, and sends approvals, payment updates and a verified delivery receipt straight to Telegram. Nobody has to start checkout.
+**A Telegram-native autonomous commerce agent.** Describe a purchasing rule once, in plain language. When an authorized GitHub event happens later (a PR is merged), BuyOnCue buys a real [Bitrefill](https://www.bitrefill.com) gift card for you, inside spending limits you set, and sends approvals, payment updates and a verified delivery receipt straight to Telegram. Nobody has to start checkout.
 
 > Built for the Free Society Hackathon, *Agentic Commerce with Bitrefill*.
 
@@ -54,7 +54,7 @@ cp -n .env.example .env
 
 ### 2. Create the Telegram bot
 
-1. In Telegram, open **@BotFather** → `/newbot` → name it *PactPilot* → copy the token into `TELEGRAM_BOT_TOKEN`.
+1. In Telegram, open **@BotFather** → `/newbot` → name it *BuyOnCue* → copy the token into `TELEGRAM_BOT_TOKEN`.
 2. (Optional) `/setdescription` and `/setuserpic` for polish. Commands are registered automatically at startup.
 3. Leave `TELEGRAM_OWNER_USER_ID` empty for now, start the service (step 5), and send `/whoami` to your bot. Put the user ID it prints into `.env` and restart. Until then the bot only answers `/start`, `/help` and `/whoami`.
 
