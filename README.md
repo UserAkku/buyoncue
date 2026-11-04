@@ -49,7 +49,7 @@ Requirements: Node.js 20+, a Telegram account, and a public HTTPS URL for the Gi
 ```bash
 cd services/chat
 npm install
-cp .env.example .env
+cp -n .env.example .env
 ```
 
 ### 2. Create the Telegram bot

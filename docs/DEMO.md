@@ -2,13 +2,15 @@
 
 **Story:** *"I set a rule once. After that, merging a PR is the only thing I do. Watch the agent buy and deliver a real gift card."*
 
+This is a prospective script, not evidence that a live purchase has occurred. Complete [the payment preflight](BASELINE_VERIFICATION.md#real-payment-preflight-explicit-owner-authorization-required) first. Product and denomination examples below must be replaced with actual available catalogue selections.
+
 ## Before you go live (not on camera)
 
 - [ ] Real engine running with live purchasing configured per the engine README, and a funded account. Check `/status` in the bot shows the mode you expect.
 - [ ] Chat service running; `curl localhost:3002/healthz` returns ok.
 - [ ] GitHub webhook shows a green `ping` delivery.
 - [ ] Test repo has an **open PR** carrying the label (e.g. `reward-ready`), ready to merge.
-- [ ] Spending limits to type on camera: per-purchase **$2**, daily **$5**, monthly **$20**, auto-approve **$1.50**. Adjust to a small amount you're happy to really spend.
+- [ ] Spending limits to type on camera: per-purchase **$2**, daily **$5**, monthly **$20**, auto-approve **$1.50**. Agree limits before the demo; if the actual quote exceeds them, stop rather than raise caps merely to complete the demonstration.
 - [ ] Hide `.env`, tokens and anything private; do not show redemption codes on a public recording (blur the code, show only the invoice ID).
 
 ## Script
