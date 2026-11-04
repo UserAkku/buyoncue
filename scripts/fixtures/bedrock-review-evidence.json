@@ -1,0 +1,81 @@
+{
+  "installationId": 404,
+  "repositoryId": 303,
+  "repositoryFullName": "buyoncue-fixture/reward-service",
+  "repositoryPrivate": false,
+  "prNumber": 42,
+  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "authorGithubUserId": 202,
+  "authorLogin": "fixture-contributor",
+  "authorIsBot": false,
+  "merged": true,
+  "collectedAt": "2026-11-04T12:00:00Z",
+  "title": "Block rewards for unauthorized callers",
+  "description": "Fixes #7. The reward handler returned true for every caller; it now checks authorization and the remaining budget. Adds a regression test.",
+  "labels": [
+    "reward-ready"
+  ],
+  "files": [
+    {
+      "path": "src/reward.ts",
+      "status": "modified",
+      "additions": 4,
+      "deletions": 1,
+      "patch": "@@ -10,5 +10,8 @@ export function canReward(caller: Caller, budget: Budget): boolean {\n-  return true;\n+  if (!caller.authorized) return false;\n+  if (budget.remainingCents <= 0) return false;\n+  return budget.remainingCents >= budget.rewardCents;\n }",
+      "patchTruncated": false
+    },
+    {
+      "path": "test/reward.test.ts",
+      "status": "added",
+      "additions": 9,
+      "deletions": 0,
+      "patch": "@@ -0,0 +1,9 @@\n+import { canReward } from '../src/reward';\n+it('blocks unauthorized callers', () => {\n+  expect(canReward({ authorized: false }, { remainingCents: 500, rewardCents: 100 })).toBe(false);\n+});\n+it('blocks when the budget is exhausted', () => {\n+  expect(canReward({ authorized: true }, { remainingCents: 0, rewardCents: 100 })).toBe(false);\n+});\n+it('allows an authorized caller within budget', () => {\n+  expect(canReward({ authorized: true }, { remainingCents: 500, rewardCents: 100 })).toBe(true);\n+});",
+      "patchTruncated": false
+    }
+  ],
+  "commits": [
+    {
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message": "Block rewards for unauthorized callers\n\nAdds authorization and budget checks with regression tests."
+    }
+  ],
+  "checks": [
+    {
+      "id": 1,
+      "name": "ci",
+      "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "completed",
+      "conclusion": "success",
+      "required": true
+    }
+  ],
+  "reviews": [
+    {
+      "id": 1,
+      "reviewerGithubUserId": 101,
+      "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "state": "APPROVED",
+      "body": "Checked the authorization and budget paths; tests cover both.",
+      "feedbackResolved": true
+    }
+  ],
+  "linkedIssues": [
+    {
+      "number": 7,
+      "title": "Rewards are granted to unauthorized callers",
+      "body": "canReward returns true unconditionally.",
+      "state": "closed"
+    }
+  ],
+  "evidenceTruncated": false,
+  "ciComplete": true,
+  "maintainerAuthorization": {
+    "actorGithubUserId": 101,
+    "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "label": "reward-ready",
+    "verifiedWriteAccess": true,
+    "source": "github_api_review",
+    "authorizedAt": "2026-11-04T11:59:00Z"
+  }
+}
