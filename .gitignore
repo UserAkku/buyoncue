@@ -1,0 +1,31 @@
+# Secrets and credentials (never commit these)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials*.json
+secrets/
+.secrets/
+
+# Dependencies and build output
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Runtime logs and local state
+*.log
+logs/
+npm-debug.log*
+*.sqlite
+*.sqlite3
+*.db
+.data/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
