@@ -110,7 +110,7 @@ export function registerGithubAuthRoutes(app: Express, d: AuthRouteDeps): void {
         "Confirm account link",
         `<p>Link GitHub account <b>${esc(ctx.githubLogin)}</b> (ID <code>${esc(ctx.githubUserId)}</code>) to the Telegram account <b>${esc(session.displayName)}</b> (ID <code>${esc(session.telegramUserId)}</code>)?</p>` +
           (session.purpose === "contributor"
-            ? `<p class="muted">Bounty rewards for your merged pull requests will be sent to that Telegram account. Only continue if you started this from the PactPilot bot yourself.</p>`
+            ? `<p class="muted">Bounty rewards for your merged pull requests will be sent to that Telegram account. Only continue if you started this from the BuyOnCue bot yourself.</p>`
             : `<p class="muted">You will then pick the repository to reward in Telegram. The app has read-only access.</p>`) +
           `<form method="post" action="/auth/github/confirm"><input type="hidden" name="sid" value="${esc(session.id)}"><input type="hidden" name="token" value="${esc(verified.confirmToken)}"><button type="submit">Confirm</button></form>`,
       );

@@ -13,7 +13,7 @@ export const COMMANDS = [
   { command: "status", description: "Purchases and automation status" },
   { command: "whoami", description: "Show my Telegram ID" },
   { command: "cancel", description: "Cancel the current setup" },
-  { command: "help", description: "What PactPilot can do" },
+  { command: "help", description: "What BuyOnCue can do" },
 ];
 
 export function toKeyboard(buttons?: Button[][]): InlineKeyboard | undefined {

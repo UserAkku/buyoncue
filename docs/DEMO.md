@@ -1,4 +1,4 @@
-# PactPilot — live demo script (2–3 minutes)
+# BuyOnCue — live demo script (2–3 minutes)
 
 **Story:** *"I set a rule once. After that, merging a PR is the only thing I do. Watch the agent buy and deliver a real gift card."*
 
@@ -17,7 +17,7 @@ This is a prospective script, not evidence that a live purchase has occurred. Co
 
 | Time | You do | You say |
 |---|---|---|
-| 0:00 | Open Telegram, bot chat. | "PactPilot is a Telegram agent that buys gift cards on its own, but only inside limits I set." |
+| 0:00 | Open Telegram, bot chat. | "BuyOnCue is a Telegram agent that buys gift cards on its own, but only inside limits I set." |
 | 0:10 | Send: *Whenever a PR with the reward-ready label is merged in acme/app, send a ₹50 Flipkart gift card, subject to my spending limits.* | "One sentence. No forms." |
 | 0:25 | Tap the real **Flipkart** result from the catalog list. | "The product comes from Bitrefill's live catalog, never from the model. It can't invent IDs." |
 | 0:35 | Tap **Me (this chat)**, then enter `2`, `5`, `20`, `1.50` for the four limits. | "Every limit is typed by me. The AI never sets money." |

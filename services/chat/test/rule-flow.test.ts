@@ -281,16 +281,16 @@ describe("engine offline", () => {
     const c = makeController(client, null);
 
     const rules = await c.handleCommand(owner, "rules", "");
-    expect(textOf(rules)).toContain("can't reach the PactPilot engine");
+    expect(textOf(rules)).toContain("can't reach the BuyOnCue engine");
 
     await c.handleCommand(owner, "newrule", "");
     await c.handleText(owner, "acme/app");
     await c.handleText(owner, "reward-ready");
     const search = await c.handleText(owner, "flipkart");
-    expect(textOf(search)).toContain("can't reach the PactPilot engine");
+    expect(textOf(search)).toContain("can't reach the BuyOnCue engine");
 
     const approve = await c.handleCallback(owner, "ap:whatever");
-    expect(cbText(approve)).toContain("can't reach the PactPilot engine");
+    expect(cbText(approve)).toContain("can't reach the BuyOnCue engine");
     expect(cbText(approve)).not.toMatch(/approved/i);
 
     await expect(client.listRules("1001")).rejects.toBeInstanceOf(EngineError);

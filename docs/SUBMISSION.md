@@ -1,8 +1,8 @@
-# PactPilot — hackathon submission
+# BuyOnCue — hackathon submission
 
 **Readiness:** automated integrated baseline verified; live purchase, delivery and video evidence still required. Do not present test invoice IDs as real.
 
-**Name:** PactPilot
+**Name:** BuyOnCue
 **One-liner:** A Telegram agent that, after one-time setup, autonomously buys Bitrefill gift cards when an authorized GitHub PR is merged, inside hard spending limits you set, and reports every step back in chat.
 
 | | |
@@ -15,7 +15,7 @@
 
 ## Bitrefill technology touchpoint
 
-PactPilot uses Bitrefill as its commerce rail. Through the engine service, it searches Bitrefill's catalog for in-stock products and exact denominations (the bot only ever offers options the catalog returned), creates and pays a Bitrefill invoice when a rule fires, and reads back the delivery result and redemption details, which it relays to the user's private Telegram chat together with the real invoice ID. No purchase is reported as successful until Bitrefill's delivery is confirmed by the engine. The Telegram chat service never calls Bitrefill directly and never holds payment credentials; this keeps the agent's conversational surface separate from the component that can move money.
+BuyOnCue uses Bitrefill as its commerce rail. Through the engine service, it searches Bitrefill's catalog for in-stock products and exact denominations (the bot only ever offers options the catalog returned), creates and pays a Bitrefill invoice when a rule fires, and reads back the delivery result and redemption details, which it relays to the user's private Telegram chat together with the real invoice ID. No purchase is reported as successful until Bitrefill's delivery is confirmed by the engine. The Telegram chat service never calls Bitrefill directly and never holds payment credentials; this keeps the agent's conversational surface separate from the component that can move money.
 
 API v2: `GET /products/search`, `GET /products/:id`, `POST /invoices` with `payment_method: "balance", auto_pay: false`, `GET /invoices/:id` using `payment.price` and `payment.currency`, `POST /invoices/:id/pay`, then `GET /orders/:id` and `redemption_info`. See [verification evidence](BASELINE_VERIFICATION.md); actual authenticated Bitrefill reads and payment remain blocked/unverified.
 
